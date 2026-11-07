@@ -1,0 +1,111 @@
+/**
+ * ARCHIVIO DI SICUREZZA - COPIA DELLA SOLUZIONE PRE-AZZERAMENTO
+ * Salvataggio completo dello stato precedente (distributori con spirali predefinite,
+ * prodotti di esempio, lotti con scadenze, ecc.) prima dell'azzeramento completo a zero.
+ * Questa copia è richiamabile e ripristinabile in qualsiasi momento.
+ */
+
+import { VendingMachine, Product, PurchaseBatch, RestockSession } from '../types';
+
+export const BACKUP_PREVIOUS_SOLUTION = {
+  version: '1.5.0-full-solution',
+  savedAt: '2026-09-15T13:00:00.000Z',
+  title: 'Copia Completa Pre-Azzeramento (Con Spirali e Dati di Esempio)',
+  description: 'Contiene la configurazione completa con spirali pre-impostate, calcoli e lotti scadenze.',
+  
+  machines: [
+    {
+      id: 'mach-01',
+      code: 'DA-01',
+      name: 'Distributore 1 - Bevande Fredde (Refrigerato)',
+      type: 'snack_bevande',
+      address: 'Punto Vendita H24 - Parete Sinistra',
+      zone: 'Negozio H24',
+      coordinates: { lat: 45.4642, lng: 9.1900, x: 20, y: 50 },
+      status: 'critico',
+      cashBalance: 0,
+      posBalance: 0,
+      lastRestockDate: '',
+      slots: [
+        { id: 'S1', label: 'Spirale 11', productId: 'prod-acqua-nat', capacity: 24, currentStock: 0, alertThreshold: 6, salePrice: 0.60, lastRestockStock: 0 },
+        { id: 'S2', label: 'Spirale 12', productId: 'prod-acqua-friz', capacity: 20, currentStock: 0, alertThreshold: 5, salePrice: 0.60, lastRestockStock: 0 },
+        { id: 'S3', label: 'Spirale 21', productId: 'prod-coca-cola', capacity: 20, currentStock: 0, alertThreshold: 5, salePrice: 1.30, lastRestockStock: 0 },
+        { id: 'S4', label: 'Spirale 22', productId: 'prod-coca-zero', capacity: 18, currentStock: 0, alertThreshold: 4, salePrice: 1.30, lastRestockStock: 0 },
+        { id: 'S5', label: 'Spirale 31', productId: 'prod-estathe', capacity: 24, currentStock: 0, alertThreshold: 6, salePrice: 1.20, lastRestockStock: 0 },
+        { id: 'S6', label: 'Spirale 32', productId: 'prod-redbull', capacity: 16, currentStock: 0, alertThreshold: 4, salePrice: 2.20, lastRestockStock: 0 },
+      ],
+    },
+    {
+      id: 'mach-02',
+      code: 'DA-02',
+      name: 'Distributore 2 - Snack & Alimenti',
+      type: 'snack_bevande',
+      address: 'Punto Vendita H24 - Parete Centrale',
+      zone: 'Negozio H24',
+      coordinates: { lat: 45.4642, lng: 9.1900, x: 50, y: 50 },
+      status: 'critico',
+      cashBalance: 0,
+      posBalance: 0,
+      lastRestockDate: '',
+      slots: [
+        { id: 'N1', label: 'Spirale A1', productId: 'prod-kinder-bueno', capacity: 18, currentStock: 0, alertThreshold: 5, salePrice: 1.40, lastRestockStock: 0 },
+        { id: 'N2', label: 'Spirale A2', productId: 'prod-baiocchi', capacity: 18, currentStock: 0, alertThreshold: 5, salePrice: 1.00, lastRestockStock: 0 },
+        { id: 'N3', label: 'Spirale B1', productId: 'prod-croissant', capacity: 16, currentStock: 0, alertThreshold: 4, salePrice: 1.20, lastRestockStock: 0 },
+        { id: 'N4', label: 'Spirale B2', productId: 'prod-patatine-rustica', capacity: 14, currentStock: 0, alertThreshold: 4, salePrice: 1.10, lastRestockStock: 0 },
+        { id: 'N5', label: 'Spirale C1', productId: 'prod-fonzies', capacity: 14, currentStock: 0, alertThreshold: 4, salePrice: 1.20, lastRestockStock: 0 },
+        { id: 'N6', label: 'Spirale C2', productId: 'prod-taralli', capacity: 16, currentStock: 0, alertThreshold: 4, salePrice: 0.90, lastRestockStock: 0 },
+        { id: 'N7', label: 'Spirale D1', productId: 'prod-tramezzino', capacity: 12, currentStock: 0, alertThreshold: 3, salePrice: 2.30, lastRestockStock: 0 },
+      ],
+    },
+    {
+      id: 'mach-03',
+      code: 'DA-03',
+      name: 'Distributore 3 - Caffè & Bevande Calde',
+      type: 'caffe_calde',
+      address: 'Punto Vendita H24 - Parete Destra',
+      zone: 'Negozio H24',
+      coordinates: { lat: 45.4642, lng: 9.1900, x: 80, y: 50 },
+      status: 'critico',
+      cashBalance: 0,
+      posBalance: 0,
+      lastRestockDate: '',
+      slots: [
+        { id: 'K1', label: 'Canestro Espresso', productId: 'prod-caffe-esp', capacity: 200, currentStock: 0, alertThreshold: 40, salePrice: 0.60, lastRestockStock: 0 },
+        { id: 'K2', label: 'Canestro Macchiato', productId: 'prod-caffe-macc', capacity: 120, currentStock: 0, alertThreshold: 25, salePrice: 0.70, lastRestockStock: 0 },
+        { id: 'K3', label: 'Canestro Cappuccino', productId: 'prod-cappuccino', capacity: 100, currentStock: 0, alertThreshold: 20, salePrice: 0.90, lastRestockStock: 0 },
+        { id: 'K4', label: 'Canestro Ginseng', productId: 'prod-ginseng', capacity: 80, currentStock: 0, alertThreshold: 15, salePrice: 0.80, lastRestockStock: 0 },
+        { id: 'K5', label: 'Canestro Cioccolata', productId: 'prod-cioccolata', capacity: 60, currentStock: 0, alertThreshold: 15, salePrice: 1.00, lastRestockStock: 0 },
+        { id: 'K6', label: 'Canestro Tè Limone', productId: 'prod-te-limone', capacity: 70, currentStock: 0, alertThreshold: 15, salePrice: 0.60, lastRestockStock: 0 },
+      ],
+    },
+  ] as VendingMachine[],
+
+  products: [
+    { id: 'prod-caffe-esp', name: 'Caffè Espresso Grani 100% Arabica', category: 'caffe_calde', unitCost: 0.12, defaultPrice: 0.60, unit: 'erogazioni', warehouseStock: 0, description: 'Miscela bar selezionata tostatura media' },
+    { id: 'prod-caffe-macc', name: 'Caffè Macchiato Caldo', category: 'caffe_calde', unitCost: 0.16, defaultPrice: 0.70, unit: 'erogazioni', warehouseStock: 0, description: 'Espresso con goccia di latte scremato' },
+    { id: 'prod-cappuccino', name: 'Cappuccino Schiumato', category: 'caffe_calde', unitCost: 0.22, defaultPrice: 0.90, unit: 'erogazioni', warehouseStock: 0, description: 'Cremoso con latte montato e tocco cacao' },
+    { id: 'prod-ginseng', name: 'Caffè al Ginseng Tradizionale', category: 'caffe_calde', unitCost: 0.20, defaultPrice: 0.80, unit: 'erogazioni', warehouseStock: 0, description: 'Estratto di radice ginseng ed espresso dolce' },
+    { id: 'prod-cioccolata', name: 'Cioccolata Calda Densa', category: 'caffe_calde', unitCost: 0.25, defaultPrice: 1.00, unit: 'erogazioni', warehouseStock: 0, description: 'Cioccolato olandese vellutato' },
+    { id: 'prod-te-limone', name: 'Tè Caldo al Limone', category: 'caffe_calde', unitCost: 0.10, defaultPrice: 0.60, unit: 'erogazioni', warehouseStock: 0, description: 'Infuso solubile aromatizzato agli agrumi' },
+    { id: 'prod-acqua-nat', name: 'Acqua Naturale 500ml', category: 'bevande_fredde', unitCost: 0.18, defaultPrice: 0.60, unit: 'bottiglie', warehouseStock: 0, description: 'Acqua minerale oligominerale' },
+    { id: 'prod-acqua-friz', name: 'Acqua Frizzante 500ml', category: 'bevande_fredde', unitCost: 0.18, defaultPrice: 0.60, unit: 'bottiglie', warehouseStock: 0, description: 'Acqua minerale effervescente naturale' },
+    { id: 'prod-coca-cola', name: 'Coca-Cola Classica 330ml', category: 'bevande_fredde', unitCost: 0.48, defaultPrice: 1.30, unit: 'lattine', warehouseStock: 0, description: 'Lattina slim in alluminio refrigerata' },
+    { id: 'prod-coca-zero', name: 'Coca-Cola Zero Zuccheri 330ml', category: 'bevande_fredde', unitCost: 0.48, defaultPrice: 1.30, unit: 'lattine', warehouseStock: 0, description: 'Gusto originale senza calorie' },
+    { id: 'prod-estathe', name: 'Estathé Limone Brik 200ml', category: 'bevande_fredde', unitCost: 0.42, defaultPrice: 1.20, unit: 'brik', warehouseStock: 0, description: 'Infuso vero di foglie di tè al limone' },
+    { id: 'prod-redbull', name: 'Red Bull Energy Drink 250ml', category: 'bevande_fredde', unitCost: 0.95, defaultPrice: 2.20, unit: 'lattine', warehouseStock: 0, description: 'Energy drink taurina e caffeina' },
+    { id: 'prod-kinder-bueno', name: 'Kinder Bueno 43g', category: 'snack_dolci', unitCost: 0.52, defaultPrice: 1.40, unit: 'pz', warehouseStock: 0, description: 'Due barrette croccanti con crema alle nocciole' },
+    { id: 'prod-loacker', name: 'Loacker Classic Napolitaner 45g', category: 'snack_dolci', unitCost: 0.40, defaultPrice: 1.10, unit: 'pz', warehouseStock: 0, description: 'Wafer con crema di nocciole 100% italiane' },
+    { id: 'prod-baiocchi', name: 'Baiocchi Mulino Bianco 56g', category: 'snack_dolci', unitCost: 0.38, defaultPrice: 1.00, unit: 'pz', warehouseStock: 0, description: 'Biscotti di frolla con crema nocciola e cacao' },
+    { id: 'prod-croissant', name: 'Croissant Farcito Cioccolato 65g', category: 'snack_dolci', unitCost: 0.45, defaultPrice: 1.20, unit: 'pz', warehouseStock: 0, description: 'Soffice pasta sfoglia a lievitazione naturale' },
+    { id: 'prod-patatine-rustica', name: 'Patatine San Carlo Rustica 50g', category: 'snack_salati', unitCost: 0.36, defaultPrice: 1.10, unit: 'buste', warehouseStock: 0, description: 'Patatine rigate spesse e croccanti al sale' },
+    { id: 'prod-fonzies', name: 'Fonzies Original al Formaggio 40g', category: 'snack_salati', unitCost: 0.42, defaultPrice: 1.20, unit: 'buste', warehouseStock: 0, description: 'Crostini di mais cotti al forno con vero formaggio' },
+    { id: 'prod-taralli', name: 'Tarallini Pugliesi Olio EVO 50g', category: 'snack_salati', unitCost: 0.30, defaultPrice: 0.90, unit: 'buste', warehouseStock: 0, description: 'Snack salato tipico all olio extravergine' },
+    { id: 'prod-cracker', name: 'Cracker Salati in Superficie 35g', category: 'snack_salati', unitCost: 0.20, defaultPrice: 0.70, unit: 'bustine', warehouseStock: 0, description: 'Snack leggero dorato al forno' },
+    { id: 'prod-tramezzino', name: 'Tramezzino Prosciutto Cotto e Maionese', category: 'freschi_healthy', unitCost: 0.90, defaultPrice: 2.30, unit: 'pz', warehouseStock: 0, description: 'Tramezzino morbido triangolare a catena del freddo' },
+    { id: 'prod-proteica', name: 'Barretta Proteica Cacao 30% 50g', category: 'freschi_healthy', unitCost: 0.85, defaultPrice: 2.00, unit: 'pz', warehouseStock: 0, description: 'Alto contenuto proteico senza zuccheri aggiunti' },
+  ] as Product[],
+
+  purchases: [] as PurchaseBatch[],
+  restockHistory: [] as RestockSession[],
+  maintenances: [],
+};

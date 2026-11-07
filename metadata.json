@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Gestionale Distributori Automatici",
+  "description": "Monitoraggio scorte in tempo reale, gestione acquisti fornitori e lotti con IVA, percorsi di rifornimento ottimizzati, calcolo vendite per carica e dashboard profitti giornalieri per bevande, snack e caffè.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

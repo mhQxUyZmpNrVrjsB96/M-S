@@ -1,0 +1,145 @@
+import React, { useState, useEffect } from 'react';
+import { VendingProvider } from './context/VendingContext';
+import { Navbar, NavTab } from './components/Navbar';
+import { QuickStoreRestock } from './components/QuickStoreRestock';
+import { ProfitsDashboard } from './components/ProfitsDashboard';
+import { StockMonitor } from './components/StockMonitor';
+import { WarehouseStockView } from './components/WarehouseStockView';
+import { ProductCatalog } from './components/ProductCatalog';
+import { PurchasesManager } from './components/PurchasesManager';
+import { RestockModal } from './components/RestockModal';
+import { UndoNotificationBanner } from './components/UndoNotificationBanner';
+import { MuralHeroBanner } from './components/MuralHeroBanner';
+import { MaintenanceManager } from './components/MaintenanceManager';
+import { ExpirationsManager } from './components/ExpirationsManager';
+import { MobileAppLayout } from './components/mobile/MobileAppLayout';
+import { Smartphone, Check } from 'lucide-react';
+import { ErrorBoundary } from './components/ErrorBoundary';
+
+function MainLayout() {
+  const [currentTab, setCurrentTab] = useState<NavTab>('quick_restock');
+  
+  // Modalità di visualizzazione: 'desktop' o 'mobile'
+  const [viewMode, setViewMode] = useState<'desktop' | 'mobile'>(() => {
+    try {
+      const saved = localStorage.getItem('vending_view_mode');
+      if (saved === 'desktop' || saved === 'mobile') return saved;
+      return typeof window !== 'undefined' && window.innerWidth < 768 ? 'mobile' : 'desktop';
+    } catch {
+      return 'desktop';
+    }
+  });
+
+  const handleSetViewMode = (mode: 'desktop' | 'mobile') => {
+    setViewMode(mode);
+    try {
+      localStorage.setItem('vending_view_mode', mode);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Se è attiva la modalità Telefono (Mobile-First)
+  if (viewMode === 'mobile') {
+    return (
+      <ErrorBoundary
+        fallbackTitle="Visualizzazione Mobile"
+        onSwitchToDesktop={() => handleSetViewMode('desktop')}
+      >
+        <MobileAppLayout
+          currentTab={currentTab}
+          onSelectTab={setCurrentTab}
+          onSwitchToDesktop={() => handleSetViewMode('desktop')}
+        />
+        {/* Modali globali */}
+        <RestockModal />
+        <UndoNotificationBanner />
+      </ErrorBoundary>
+    );
+  }
+
+  // Altrimenti modalità Desktop (Copia originale)
+  return (
+    <div className="min-h-screen bg-cosmic-nebula text-stone-100 flex flex-col font-sans antialiased selection:bg-amber-500 selection:text-stone-950">
+      {/* Banner di avviso Copia & Switch Rapido */}
+      <div className="bg-stone-950/90 border-b border-stone-800/80 px-4 py-1.5 text-center text-2xs text-stone-400 flex items-center justify-center gap-2">
+        <span className="inline-flex items-center text-emerald-400 font-semibold gap-1">
+          <Check className="w-3.5 h-3.5" />
+          Copia originale salvata
+        </span>
+        <span className="text-stone-600">•</span>
+        <span>Stai visualizzando la modalità Desktop.</span>
+        <button
+          type="button"
+          onClick={() => handleSetViewMode('mobile')}
+          className="inline-flex items-center gap-1 font-bold text-amber-400 hover:text-amber-300 underline cursor-pointer ml-1"
+        >
+          <Smartphone className="w-3 h-3" />
+          Passa alla versione Telefono
+        </button>
+      </div>
+
+      {/* Navigation Header Desktop */}
+      <Navbar 
+        currentTab={currentTab} 
+        onSelectTab={setCurrentTab} 
+        onSwitchToMobile={() => handleSetViewMode('mobile')}
+      />
+
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Mural Tribute Hero Banner */}
+        <MuralHeroBanner />
+
+        {currentTab === 'quick_restock' && <QuickStoreRestock />}
+        {currentTab === 'stock' && <StockMonitor onNavigateToWarehouse={() => setCurrentTab('warehouse')} />}
+        {currentTab === 'maintenance' && <MaintenanceManager />}
+        {currentTab === 'warehouse' && <WarehouseStockView onNavigateToPurchases={() => setCurrentTab('purchases')} />}
+        {currentTab === 'purchases' && <PurchasesManager />}
+        {currentTab === 'dashboard' && <ProfitsDashboard />}
+        {currentTab === 'products' && <ProductCatalog />}
+        {currentTab === 'expirations' && <ExpirationsManager onNavigateToPurchases={() => setCurrentTab('purchases')} />}
+      </main>
+
+      {/* Global Restock & Reconciliation Modal */}
+      <RestockModal />
+
+      {/* Floating Undo Notification Toast */}
+      <UndoNotificationBanner />
+
+      {/* Footer */}
+      <footer className="border-t border-stone-800/80 bg-stone-950/90 py-5 mt-auto">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between text-xs text-stone-400 gap-3">
+          <div className="flex items-center space-x-2">
+            <span className="font-graffiti text-amber-400 text-sm font-bold tracking-wide">M&amp;S</span>
+            <span className="font-bold text-white uppercase tracking-wider">TAKE A MANAGMENT</span>
+            <span className="text-stone-600">•</span>
+            <span className="text-stone-400">Negozio H24 Distributori Automatici</span>
+          </div>
+          <div className="flex items-center space-x-3 text-2xs text-stone-400">
+            <button
+              onClick={() => handleSetViewMode('mobile')}
+              className="text-amber-400 hover:underline flex items-center gap-1 font-bold"
+            >
+              <Smartphone className="w-3 h-3" />
+              Versione per Telefono
+            </button>
+            <span className="text-stone-700">•</span>
+            <span>Riconciliazione Rapida &amp; Lotti</span>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <VendingProvider>
+        <MainLayout />
+      </VendingProvider>
+    </ErrorBoundary>
+  );
+}
+
