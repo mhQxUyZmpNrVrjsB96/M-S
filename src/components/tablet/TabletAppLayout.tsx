@@ -436,7 +436,7 @@ export const TabletAppLayout: React.FC<TabletAppLayoutProps> = ({
 
         {/* 3. BARRA NAVIGAZIONE SUPERIORE PER TABLET (Pulita su 1 riga con menu a tendina) */}
         <div className="bg-stone-900/95 border-t border-stone-800/80">
-          <div className="max-w-6xl mx-auto px-3 sm:px-4 py-2 flex items-center justify-between gap-2">
+          <div className="max-w-5xl mx-auto px-3 sm:px-4 py-2 flex items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5 min-w-0 flex-1">
               {/* Tab 1: Carica Rapida Negozio */}
               <button
