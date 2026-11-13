@@ -2293,11 +2293,17 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       // Sincronizza contemporaneamente nel database PostgreSQL Supabase nel cloud
       if (isSupabaseConfigured()) {
+        lastLocalPushAtRef.current = Date.now();
         pushFullDatabaseToSupabase(snapshotData).then(res => {
           if (res.success) {
+            lastSyncedHashRef.current = JSON.stringify(snapshotData);
+            hasPendingLocalPushRef.current = false;
             setLastCloudSync(timestamp);
             setSupabaseStatus('connected');
             setCloudSyncError(null);
+          } else {
+            setSupabaseStatus('error');
+            setCloudSyncError(res.error || 'Errore sincronizzazione Supabase');
           }
         }).catch(err => {
           console.warn('[Supabase saveAllDataNow error]', err);
@@ -2386,65 +2392,173 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
 
   const isRemoteSyncingRef = useRef(false);
-  const initialLoadDoneRef = useRef(false);
+  const initialLoadStartedRef = useRef(false);
+  const hasCompletedInitialCloudSyncRef = useRef(false);
+  const hasPendingLocalPushRef = useRef(false);
+  const localRevisionRef = useRef(0);
+  const lastSyncedHashRef = useRef<string | null>(null);
+  const lastLocalPushAtRef = useRef<number>(0);
+  const syncCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Caricamento completo da Supabase (con sincronizzazione e sanificazione)
+  const latestDataRef = useRef<FullVendingData>({
+    machines,
+    products,
+    purchases,
+    restockHistory,
+    maintenances,
+    fixedCosts,
+    trackedSpirals,
+    dosagePresets,
+  });
+  latestDataRef.current = {
+    machines,
+    products,
+    purchases,
+    restockHistory,
+    maintenances,
+    fixedCosts,
+    trackedSpirals,
+    dosagePresets,
+  };
+
+  // Caricamento completo da Supabase (con sincronizzazione, sanificazione e protezione anti-sovrascrittura)
   const loadFromSupabaseCloud = useCallback(async (): Promise<boolean> => {
     if (!isSupabaseConfigured()) {
       setSupabaseStatus('unconfigured');
       return false;
     }
 
+    // Se ci sono modifiche locali in attesa di essere inviate al cloud, non sovrascriverle
+    if (hasPendingLocalPushRef.current && hasCompletedInitialCloudSyncRef.current) {
+      return true;
+    }
+
+    if (syncCooldownTimerRef.current) {
+      clearTimeout(syncCooldownTimerRef.current);
+      syncCooldownTimerRef.current = null;
+    }
+    const fetchStartRevision = localRevisionRef.current;
+    isRemoteSyncingRef.current = true;
     setIsCloudSyncing(true);
     setSupabaseStatus('connecting');
+
+    let armedCooldown = false;
     try {
       const res = await loadAllFromSupabase();
+
+      // Se l'utente ha modificato qualcosa localmente mentre il fetch era in volo, non sovrascrivere
+      if (hasCompletedInitialCloudSyncRef.current && (localRevisionRef.current !== fetchStartRevision || hasPendingLocalPushRef.current)) {
+        return true;
+      }
+
       if (res.success && res.data) {
         const d = res.data;
-        const hasRemoteData = (d.machines && d.machines.length > 0) || (d.products && d.products.length > 0) || (d.purchases && d.purchases.length > 0);
+        const local = latestDataRef.current;
 
-        if (hasRemoteData) {
-          isRemoteSyncingRef.current = true;
-          if (Array.isArray(d.machines) && d.machines.length > 0) {
-            setMachines(d.machines.map(m => ({
-              ...m,
-              slots: Array.isArray(m.slots) ? sortSlotsByNumericOrder(m.slots) : [],
-              cashBalance: m.cashBalance ?? 0,
-              posBalance: m.posBalance ?? 0,
-              coffeeCounterCurrent: m.coffeeCounterCurrent ?? 0,
-              coffeeCounterLastRestock: m.coffeeCounterLastRestock ?? 0,
-            })));
-          }
-          if (Array.isArray(d.products)) setProducts(d.products);
-          if (Array.isArray(d.purchases)) setPurchases(d.purchases);
-          if (Array.isArray(d.restockHistory)) setRestockHistory(d.restockHistory);
-          if (Array.isArray(d.maintenances)) setMaintenances(d.maintenances);
-          if (Array.isArray(d.fixedCosts)) setFixedCosts(d.fixedCosts);
-          if (Array.isArray(d.trackedSpirals)) setTrackedSpirals(d.trackedSpirals);
-          if (Array.isArray(d.dosagePresets)) setDosagePresets(d.dosagePresets);
+        const remoteMachines = (Array.isArray(d.machines) && d.machines.length > 0 ? d.machines : local.machines).map(m => ({
+          ...m,
+          slots: Array.isArray(m.slots) ? sortSlotsByNumericOrder(m.slots) : [],
+          cashBalance: m.cashBalance ?? 0,
+          posBalance: m.posBalance ?? 0,
+          coffeeCounterCurrent: m.coffeeCounterCurrent ?? 0,
+          coffeeCounterLastRestock: m.coffeeCounterLastRestock ?? 0,
+        }));
 
+        const remoteTotalSlots = remoteMachines.reduce((s, m) => s + (m.slots?.length || 0), 0);
+        const localTotalSlots = local.machines.reduce((s, m) => s + (m.slots?.length || 0), 0);
+
+        const remoteProducts = Array.isArray(d.products) ? d.products : [];
+        const remotePurchases = Array.isArray(d.purchases) ? d.purchases : [];
+        const remoteHistory = Array.isArray(d.restockHistory) ? d.restockHistory : [];
+        const remoteMaintenances = Array.isArray(d.maintenances) ? d.maintenances : [];
+        const remoteFixedCosts = Array.isArray(d.fixedCosts) ? d.fixedCosts : local.fixedCosts;
+        const remoteTrackedSpirals = Array.isArray(d.trackedSpirals) ? d.trackedSpirals : [];
+        const remoteDosagePresets = Array.isArray(d.dosagePresets) && d.dosagePresets.length > 0 ? d.dosagePresets : local.dosagePresets;
+
+        const hasRemoteData =
+          remoteTotalSlots > 0 ||
+          remoteProducts.length > 0 ||
+          remotePurchases.length > 0 ||
+          remoteHistory.length > 0 ||
+          remoteMaintenances.length > 0;
+
+        const hasLocalData =
+          localTotalSlots > 0 ||
+          local.products.length > 0 ||
+          local.purchases.length > 0 ||
+          local.restockHistory.length > 0 ||
+          local.maintenances.length > 0;
+
+        // Protezione: se al primo avvio locale ci sono dati reali e il cloud ha solo gusci vuoti, invia i dati locali al cloud
+        const shouldMigrateLocalToCloud = !hasRemoteData && hasLocalData;
+
+        if (hasRemoteData && !shouldMigrateLocalToCloud) {
+          const appliedPayload: FullVendingData = {
+            machines: remoteMachines,
+            products: remoteProducts,
+            purchases: remotePurchases,
+            restockHistory: remoteHistory,
+            maintenances: remoteMaintenances,
+            fixedCosts: remoteFixedCosts,
+            trackedSpirals: remoteTrackedSpirals,
+            dosagePresets: remoteDosagePresets,
+          };
+
+          const remoteHash = JSON.stringify(appliedPayload);
           const syncTime = d.lastUpdated || new Date().toISOString();
+
+          // Evita re-render inutili se i dati locali corrispondono già allo stato cloud
+          if (lastSyncedHashRef.current !== remoteHash) {
+            lastSyncedHashRef.current = remoteHash;
+            hasPendingLocalPushRef.current = false;
+
+            setMachines(remoteMachines);
+            setProducts(remoteProducts);
+            setPurchases(remotePurchases);
+            setRestockHistory(remoteHistory);
+            setMaintenances(remoteMaintenances);
+            setFixedCosts(remoteFixedCosts);
+            setTrackedSpirals(remoteTrackedSpirals);
+            setDosagePresets(remoteDosagePresets);
+
+            try {
+              localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(remoteMachines));
+              localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(remoteProducts));
+              localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(remotePurchases));
+              localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(remoteHistory));
+              localStorage.setItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(remoteMaintenances));
+              localStorage.setItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(remoteFixedCosts));
+              localStorage.setItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(remoteTrackedSpirals));
+              localStorage.setItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(remoteDosagePresets));
+            } catch (storageErr) {
+              console.warn('[Supabase -> localStorage] Errore salvataggio locale:', storageErr);
+            }
+
+            armedCooldown = true;
+            syncCooldownTimerRef.current = setTimeout(() => {
+              isRemoteSyncingRef.current = false;
+              syncCooldownTimerRef.current = null;
+            }, 150);
+          }
+
           setLastCloudSync(syncTime);
           setSupabaseStatus('connected');
           setCloudSyncError(null);
-          setTimeout(() => {
-            isRemoteSyncingRef.current = false;
-          }, 1500);
+          hasCompletedInitialCloudSyncRef.current = true;
           return true;
         } else {
-          // Supabase non ha ancora dati o è stato appena creato: effettua la prima migrazione del gestionale
-          if (machines.length > 0 || products.length > 0) {
-            await pushFullDatabaseToSupabase({
-              machines,
-              products,
-              purchases,
-              restockHistory,
-              maintenances,
-              fixedCosts,
-              trackedSpirals,
-              dosagePresets,
-            });
+          // Supabase non ha ancora dati reali: effettua la prima migrazione SOLO se questo dispositivo ha dati
+          if (hasLocalData) {
+            lastLocalPushAtRef.current = Date.now();
+            const pushRes = await pushFullDatabaseToSupabase(local);
+            if (!pushRes.success) {
+              setSupabaseStatus('error');
+              setCloudSyncError(pushRes.error || 'Errore inizializzazione Supabase');
+              return false;
+            }
           }
+          lastSyncedHashRef.current = JSON.stringify(local);
+          hasCompletedInitialCloudSyncRef.current = true;
           setSupabaseStatus('connected');
           setCloudSyncError(null);
           setLastCloudSync(new Date().toISOString());
@@ -2461,8 +2575,11 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return false;
     } finally {
       setIsCloudSyncing(false);
+      if (!armedCooldown) {
+        isRemoteSyncingRef.current = false;
+      }
     }
-  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
+  }, []);
 
   // Forza sincronizzazione manuale di tutto il database su Supabase
   const forceCloudSync = useCallback(async (): Promise<{ success: boolean; message: string }> => {
@@ -2471,7 +2588,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
     setIsCloudSyncing(true);
     try {
-      const res = await pushFullDatabaseToSupabase({
+      const payload: FullVendingData = {
         machines,
         products,
         purchases,
@@ -2480,10 +2597,15 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         fixedCosts,
         trackedSpirals,
         dosagePresets,
-      });
+      };
+      lastLocalPushAtRef.current = Date.now();
+      const res = await pushFullDatabaseToSupabase(payload);
 
       if (res.success) {
         const time = new Date().toISOString();
+        lastSyncedHashRef.current = JSON.stringify(payload);
+        hasPendingLocalPushRef.current = false;
+        hasCompletedInitialCloudSyncRef.current = true;
         setLastCloudSync(time);
         setSupabaseStatus('connected');
         setCloudSyncError(null);
@@ -2534,7 +2656,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [loadFromSupabaseCloud, forceCloudSync, cloudSyncError]);
 
-  // Ascolto in tempo reale (Supabase Realtime) per sincronizzazione multi-device (PC, Tablet, Smartphone)
+  // Ascolto in tempo reale (Supabase Realtime) + riallineamento automatico su mobile (foreground / online / polling)
   useEffect(() => {
     if (!isSupabaseConfigured()) {
       setSupabaseStatus('unconfigured');
@@ -2542,50 +2664,111 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     // Carica dati remoti all'avvio
-    if (!initialLoadDoneRef.current) {
-      initialLoadDoneRef.current = true;
+    if (!initialLoadStartedRef.current) {
+      initialLoadStartedRef.current = true;
       loadFromSupabaseCloud();
     }
 
-    // Sottoscrizione realtime ai canali PostgreSQL
+    // Sottoscrizione realtime stabile ai canali PostgreSQL
     const unsubscribe = subscribeToRealtimeChanges(() => {
-      // Quando un altro device modifica i dati, aggiorna istantaneamente questo client
-      if (!isRemoteSyncingRef.current) {
+      if (!isRemoteSyncingRef.current && Date.now() - lastLocalPushAtRef.current > 2500) {
         loadFromSupabaseCloud();
       }
     });
 
+    // Su mobile/tablet i WebSocket vanno in pausa quando lo schermo si spegne o si cambia app:
+    // ricarica automaticamente dal cloud appena la pagina torna visibile o torna la rete
+    const handleVisibilityOrFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (!isRemoteSyncingRef.current && !hasPendingLocalPushRef.current && Date.now() - lastLocalPushAtRef.current > 2000) {
+        loadFromSupabaseCloud();
+      }
+    };
+
+    const handleOnline = () => {
+      if (!isRemoteSyncingRef.current && !hasPendingLocalPushRef.current) {
+        loadFromSupabaseCloud();
+      }
+    };
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', handleVisibilityOrFocus);
+      window.addEventListener('online', handleOnline);
+    }
+
+    // Polling di sicurezza ogni 12 secondi finché la scheda è attiva (garantisce sync su mobile anche se Realtime WebSocket è sospeso)
+    const pollInterval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (!isRemoteSyncingRef.current && !hasPendingLocalPushRef.current && Date.now() - lastLocalPushAtRef.current > 3000) {
+        loadFromSupabaseCloud();
+      }
+    }, 12000);
+
     return () => {
       unsubscribe();
+      clearInterval(pollInterval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleVisibilityOrFocus);
+        window.removeEventListener('online', handleOnline);
+      }
     };
   }, [loadFromSupabaseCloud]);
 
-  // Auto-sync debounced verso Supabase su ogni modifica locale
+  // Auto-sync debounced verso Supabase SOLO dopo il completamento del primo caricamento cloud e SOLO se ci sono modifiche reali
   useEffect(() => {
-    if (!isSupabaseConfigured() || isRemoteSyncingRef.current || !initialLoadDoneRef.current) {
+    if (!isSupabaseConfigured() || !hasCompletedInitialCloudSyncRef.current) {
       return;
     }
 
+    const payload: FullVendingData = {
+      machines,
+      products,
+      purchases,
+      restockHistory,
+      maintenances,
+      fixedCosts,
+      trackedSpirals,
+      dosagePresets,
+    };
+    const currentHash = JSON.stringify(payload);
+    if (lastSyncedHashRef.current === currentHash) {
+      hasPendingLocalPushRef.current = false;
+      return;
+    }
+
+    // Se stiamo applicando i dati appena ricevuti da Supabase, aggiorna l'hash senza ri-inviare
+    if (isRemoteSyncingRef.current) {
+      lastSyncedHashRef.current = currentHash;
+      hasPendingLocalPushRef.current = false;
+      return;
+    }
+
+    localRevisionRef.current += 1;
+    hasPendingLocalPushRef.current = true;
     const timer = setTimeout(() => {
-      pushFullDatabaseToSupabase({
-        machines,
-        products,
-        purchases,
-        restockHistory,
-        maintenances,
-        fixedCosts,
-        trackedSpirals,
-        dosagePresets,
-      }).then(res => {
+      lastLocalPushAtRef.current = Date.now();
+      pushFullDatabaseToSupabase(payload).then(res => {
+        hasPendingLocalPushRef.current = false;
         if (res.success) {
+          lastSyncedHashRef.current = currentHash;
           setLastCloudSync(new Date().toISOString());
           setSupabaseStatus('connected');
           setCloudSyncError(null);
+        } else {
+          setSupabaseStatus('error');
+          setCloudSyncError(res.error || 'Errore sincronizzazione Supabase');
         }
       }).catch(err => {
+        hasPendingLocalPushRef.current = false;
         console.warn('[Supabase auto-sync]', err);
       });
-    }, 1500);
+    }, 900);
 
     return () => clearTimeout(timer);
   }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);

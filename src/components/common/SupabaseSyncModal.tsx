@@ -31,6 +31,7 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({ isOpen, on
     isCloudSyncing,
     cloudSyncError,
     forceCloudSync,
+    loadFromSupabaseCloud,
     saveSupabaseCredentials,
     supabaseProjectUrl,
     machines,
@@ -62,6 +63,16 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({ isOpen, on
       setFeedbackMsg({ type: 'success', text: res.message });
     } else {
       setFeedbackMsg({ type: 'error', text: res.message });
+    }
+  };
+
+  const handleManualPull = async () => {
+    setFeedbackMsg(null);
+    const ok = await loadFromSupabaseCloud();
+    if (ok) {
+      setFeedbackMsg({ type: 'success', text: 'Dati scaricati e aggiornati dal cloud Supabase!' });
+    } else {
+      setFeedbackMsg({ type: 'error', text: cloudSyncError || 'Impossibile scaricare i dati da Supabase.' });
     }
   };
 
@@ -188,8 +199,18 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({ isOpen, on
           </div>
         </div>
 
-        {/* Tasto Sincronizzazione Immediata */}
-        <div className="flex items-center justify-between pt-1">
+        {/* Tasti Sincronizzazione Immediata */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+          <button
+            type="button"
+            onClick={handleManualPull}
+            disabled={isCloudSyncing}
+            className="w-full inline-flex items-center justify-center space-x-2 px-4 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-emerald-300 border border-emerald-500/40 font-bold text-xs transition-colors cursor-pointer shadow-md disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${isCloudSyncing ? 'animate-spin' : ''}`} />
+            <span>{isCloudSyncing ? 'Aggiornamento...' : 'Scarica Dati dal Cloud'}</span>
+          </button>
+
           <button
             type="button"
             onClick={handleManualSync}
@@ -197,7 +218,7 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({ isOpen, on
             className="w-full inline-flex items-center justify-center space-x-2 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-xs transition-colors cursor-pointer shadow-md disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${isCloudSyncing ? 'animate-spin' : ''}`} />
-            <span>{isCloudSyncing ? 'Sincronizzazione in corso...' : 'Sincronizza Tutto Adesso su Supabase'}</span>
+            <span>{isCloudSyncing ? 'Sincronizzazione...' : 'Invia Questo Dispositivo su Supabase'}</span>
           </button>
         </div>
 

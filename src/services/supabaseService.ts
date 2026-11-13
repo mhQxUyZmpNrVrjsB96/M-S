@@ -338,6 +338,54 @@ function mapRowToDosagePreset(row: any): CoffeeDosagePreset {
 
 export const loadAllFromSupabase = fetchFullDatabaseFromSupabase;
 
+function parseTimeMs(iso?: string | null): number {
+  if (!iso) return 0;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function recoverSlotsFromTrackedSpirals(
+  machines: VendingMachine[],
+  trackedSpirals: TrackedSpiralRecord[]
+): VendingMachine[] {
+  const totalSlots = machines.reduce((sum, m) => sum + (Array.isArray(m.slots) ? m.slots.length : 0), 0);
+  if (totalSlots > 0 || trackedSpirals.length === 0) {
+    return machines;
+  }
+
+  const activeByMachine = new Map<string, TrackedSpiralRecord[]>();
+  for (const t of trackedSpirals) {
+    if (t.status === 'attiva' && t.machineId && t.slotId) {
+      const list = activeByMachine.get(t.machineId) || [];
+      list.push(t);
+      activeByMachine.set(t.machineId, list);
+    }
+  }
+
+  if (activeByMachine.size === 0) {
+    return machines;
+  }
+
+  return machines.map(m => {
+    const active = activeByMachine.get(m.id);
+    if (!active || active.length === 0) return m;
+    const recoveredSlots = active.map(t => ({
+      id: t.slotId,
+      label: t.label || '1',
+      productId: t.productId,
+      capacity: Math.max(1, Number(t.currentCapacity) || 10),
+      currentStock: Math.max(0, Number(t.currentStock) || 0),
+      alertThreshold: 5,
+      salePrice: Number(t.currentSalePrice) || 1.0,
+      lastRestockStock: Math.max(0, Number(t.currentStock) || 0),
+    }));
+    return {
+      ...m,
+      slots: recoveredSlots,
+    };
+  });
+}
+
 export async function fetchFullDatabaseFromSupabase(): Promise<{
   success: boolean;
   data?: FullVendingData;
@@ -350,8 +398,9 @@ export async function fetchFullDatabaseFromSupabase(): Promise<{
   }
 
   try {
-    // 1. Prova prima a recuperare da tabelle relazionali dedicate
+    // Recupera sia lo snapshot atomico vending_store_state sia le tabelle relazionali in parallelo
     const [
+      stateRes,
       machinesRes,
       productsRes,
       purchasesRes,
@@ -361,6 +410,11 @@ export async function fetchFullDatabaseFromSupabase(): Promise<{
       trackedSpiralsRes,
       dosagePresetsRes
     ] = await Promise.allSettled([
+      supabase
+        .from('vending_store_state')
+        .select('state_json, updated_at')
+        .eq('id', 'primary_store')
+        .maybeSingle(),
       supabase.from('vending_machines').select('*'),
       supabase.from('vending_products').select('*'),
       supabase.from('vending_purchases').select('*'),
@@ -371,69 +425,108 @@ export async function fetchFullDatabaseFromSupabase(): Promise<{
       supabase.from('vending_dosage_presets').select('*'),
     ]);
 
+    const hasSnapshot =
+      stateRes.status === 'fulfilled' &&
+      !stateRes.value.error &&
+      stateRes.value.data &&
+      stateRes.value.data.state_json;
+
+    const snapshotRow = hasSnapshot ? (stateRes as PromiseFulfilledResult<any>).value.data : null;
+    const snapshotTimeMs = parseTimeMs(snapshotRow?.updated_at);
+
     const hasTables =
       machinesRes.status === 'fulfilled' && !machinesRes.value.error &&
       productsRes.status === 'fulfilled' && !productsRes.value.error;
 
+    let tablesData: FullVendingData | null = null;
+    let maxTableTimeMs = 0;
+
     if (hasTables) {
       const machinesRows = (machinesRes as PromiseFulfilledResult<any>).value.data || [];
       const productsRows = (productsRes as PromiseFulfilledResult<any>).value.data || [];
-      const purchasesRows = purchasesRes.status === 'fulfilled' && purchasesRes.value.data ? purchasesRes.value.data : [];
-      const historyRows = historyRes.status === 'fulfilled' && historyRes.value.data ? historyRes.value.data : [];
-      const maintenancesRows = maintenancesRes.status === 'fulfilled' && maintenancesRes.value.data ? maintenancesRes.value.data : [];
-      const fixedCostsRows = fixedCostsRes.status === 'fulfilled' && fixedCostsRes.value.data ? fixedCostsRes.value.data : [];
-      const trackedSpiralsRows = trackedSpiralsRes.status === 'fulfilled' && trackedSpiralsRes.value.data ? trackedSpiralsRes.value.data : [];
-      const dosagePresetsRows = dosagePresetsRes.status === 'fulfilled' && dosagePresetsRes.value.data ? dosagePresetsRes.value.data : [];
+      const purchasesRows = purchasesRes.status === 'fulfilled' && !purchasesRes.value.error && purchasesRes.value.data ? purchasesRes.value.data : [];
+      const historyRows = historyRes.status === 'fulfilled' && !historyRes.value.error && historyRes.value.data ? historyRes.value.data : [];
+      const maintenancesRows = maintenancesRes.status === 'fulfilled' && !maintenancesRes.value.error && maintenancesRes.value.data ? maintenancesRes.value.data : [];
+      const fixedCostsRows = fixedCostsRes.status === 'fulfilled' && !fixedCostsRes.value.error && fixedCostsRes.value.data ? fixedCostsRes.value.data : [];
+      const trackedSpiralsRows = trackedSpiralsRes.status === 'fulfilled' && !trackedSpiralsRes.value.error && trackedSpiralsRes.value.data ? trackedSpiralsRes.value.data : [];
+      const dosagePresetsRows = dosagePresetsRes.status === 'fulfilled' && !dosagePresetsRes.value.error && dosagePresetsRes.value.data ? dosagePresetsRes.value.data : [];
 
-      const resultData: FullVendingData = {
-        machines: machinesRows.map(mapRowToMachine),
+      for (const rows of [machinesRows, productsRows, purchasesRows, historyRows, maintenancesRows, fixedCostsRows, trackedSpiralsRows, dosagePresetsRows]) {
+        for (const row of rows) {
+          const t = parseTimeMs(row?.updated_at);
+          if (t > maxTableTimeMs) maxTableTimeMs = t;
+        }
+      }
+
+      const mappedTracked = trackedSpiralsRows.map(mapRowToTrackedSpiral);
+      const mappedMachines = recoverSlotsFromTrackedSpirals(machinesRows.map(mapRowToMachine), mappedTracked);
+
+      tablesData = {
+        machines: mappedMachines,
         products: productsRows.map(mapRowToProduct),
         purchases: purchasesRows.map(mapRowToPurchase),
         restockHistory: historyRows.map(mapRowToRestock),
         maintenances: maintenancesRows.map(mapRowToMaintenance),
         fixedCosts: fixedCostsRows.map(mapRowToFixedCost),
-        trackedSpirals: trackedSpiralsRows.map(mapRowToTrackedSpiral),
+        trackedSpirals: mappedTracked,
         dosagePresets: dosagePresetsRows.map(mapRowToDosagePreset),
-        lastUpdated: new Date().toISOString(),
+        lastUpdated: maxTableTimeMs > 0 ? new Date(maxTableTimeMs).toISOString() : new Date().toISOString(),
       };
+    }
 
+    if (snapshotRow) {
+      const snap = snapshotRow.state_json;
+      const snapTracked: TrackedSpiralRecord[] = Array.isArray(snap.trackedSpirals) ? snap.trackedSpirals : [];
+      const snapMachinesRaw: VendingMachine[] = Array.isArray(snap.machines) ? snap.machines : [];
+      const snapMachines = recoverSlotsFromTrackedSpirals(snapMachinesRaw, snapTracked);
+      const snapProducts: Product[] = Array.isArray(snap.products) ? snap.products : [];
+
+      const snapSlotCount = snapMachines.reduce((s, m) => s + (m.slots?.length || 0), 0);
+      const tableSlotCount = tablesData ? tablesData.machines.reduce((s, m) => s + (m.slots?.length || 0), 0) : 0;
+      const tableProdCount = tablesData ? tablesData.products.length : 0;
+
+      // Rileva snapshot svuotato per errore rispetto alle tabelle relazionali (es. bug avvio mobile vuoto)
+      const snapshotLooksCorruptedEmpty =
+        snapSlotCount === 0 &&
+        snapProducts.length === 0 &&
+        (tableSlotCount > 0 || tableProdCount > 0);
+
+      if (!snapshotLooksCorruptedEmpty && (!tablesData || snapshotTimeMs >= maxTableTimeMs)) {
+        return {
+          success: true,
+          data: {
+            machines: snapMachines,
+            products: snapProducts,
+            purchases: Array.isArray(snap.purchases) ? snap.purchases : [],
+            restockHistory: Array.isArray(snap.restockHistory) ? snap.restockHistory : [],
+            maintenances: Array.isArray(snap.maintenances) ? snap.maintenances : [],
+            fixedCosts: Array.isArray(snap.fixedCosts) ? snap.fixedCosts : [],
+            trackedSpirals: snapTracked,
+            dosagePresets: Array.isArray(snap.dosagePresets) ? snap.dosagePresets : [],
+            lastUpdated: snapshotRow.updated_at || new Date().toISOString(),
+          },
+          source: 'snapshot',
+        };
+      }
+    }
+
+    if (tablesData) {
       return {
         success: true,
-        data: resultData,
+        data: tablesData,
         source: 'tables',
       };
     }
 
-    // 2. Fallback: Controlla se è presente la tabella vending_store_state (snapshot unificato)
-    const stateRes = await supabase
-      .from('vending_store_state')
-      .select('state_json, updated_at')
-      .eq('id', 'primary_store')
-      .maybeSingle();
-
-    if (stateRes.data && stateRes.data.state_json) {
-      const snap = stateRes.data.state_json;
-      return {
-        success: true,
-        data: {
-          machines: snap.machines || [],
-          products: snap.products || [],
-          purchases: snap.purchases || [],
-          restockHistory: snap.restockHistory || [],
-          maintenances: snap.maintenances || [],
-          fixedCosts: snap.fixedCosts || [],
-          trackedSpirals: snap.trackedSpirals || [],
-          dosagePresets: snap.dosagePresets || [],
-          lastUpdated: stateRes.data.updated_at || new Date().toISOString(),
-        },
-        source: 'snapshot',
-      };
-    }
+    const firstError =
+      (stateRes.status === 'fulfilled' && stateRes.value.error?.message) ||
+      (machinesRes.status === 'fulfilled' && machinesRes.value.error?.message) ||
+      (productsRes.status === 'fulfilled' && productsRes.value.error?.message);
 
     return {
       success: false,
       source: 'none',
-      error: 'Tabelle Supabase non ancora create o prive di permessi RLS',
+      error: firstError || 'Tabelle Supabase non ancora create o prive di permessi RLS',
     };
   } catch (err: any) {
     console.error('[Supabase] Errore fetch:', err);
@@ -593,6 +686,44 @@ export async function deleteDosagePresetFromSupabase(id: string) {
 // Sincronizzazione Completa Atomica (Push Totale)
 // -------------------------------------------------------------
 
+async function syncTableRows(
+  table: string,
+  rows: Array<Record<string, any> & { id: string }>
+): Promise<{ error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase) return { error: 'Supabase non configurato' };
+
+  try {
+    const existingRes = await supabase.from(table).select('id');
+    if (existingRes.error) {
+      return { error: existingRes.error.message };
+    }
+
+    const currentIds = new Set(rows.map(r => r.id));
+    const removedIds = (existingRes.data || [])
+      .map((r: any) => r.id)
+      .filter((id: string) => !currentIds.has(id));
+
+    if (removedIds.length > 0) {
+      const delRes = await supabase.from(table).delete().in('id', removedIds);
+      if (delRes.error) {
+        return { error: delRes.error.message };
+      }
+    }
+
+    if (rows.length > 0) {
+      const upsertRes = await supabase.from(table).upsert(rows);
+      if (upsertRes.error) {
+        return { error: upsertRes.error.message };
+      }
+    }
+
+    return {};
+  } catch (err: any) {
+    return { error: err?.message || `Errore sync tabella ${table}` };
+  }
+}
+
 export async function pushFullDatabaseToSupabase(data: FullVendingData): Promise<{ success: boolean; error?: string }> {
   const supabase = getSupabase();
   if (!supabase) {
@@ -602,8 +733,20 @@ export async function pushFullDatabaseToSupabase(data: FullVendingData): Promise
   try {
     const timestamp = new Date().toISOString();
 
-    // 1. Salva snapshot compatto unificato (garantisce consistenza 100% istantanea su tutti i device)
-    const statePromise = supabase
+    // 1. Aggiorna prima tutte le tabelle relazionali (inclusa rimozione righe eliminate)
+    const tableResults = await Promise.all([
+      syncTableRows('vending_machines', data.machines.map(m => ({ ...mapMachineToRow(m), updated_at: timestamp }))),
+      syncTableRows('vending_products', data.products.map(p => ({ ...mapProductToRow(p), updated_at: timestamp }))),
+      syncTableRows('vending_purchases', data.purchases.map(b => ({ ...mapPurchaseToRow(b), updated_at: timestamp }))),
+      syncTableRows('vending_restock_history', data.restockHistory.map(s => ({ ...mapRestockToRow(s), updated_at: timestamp }))),
+      syncTableRows('vending_maintenances', data.maintenances.map(m => ({ ...mapMaintenanceToRow(m), updated_at: timestamp }))),
+      syncTableRows('vending_fixed_costs', data.fixedCosts.map(fc => ({ ...mapFixedCostToRow(fc), updated_at: timestamp }))),
+      syncTableRows('vending_tracked_spirals', data.trackedSpirals.map(t => ({ ...mapTrackedSpiralToRow(t), updated_at: timestamp }))),
+      syncTableRows('vending_dosage_presets', data.dosagePresets.map(p => ({ ...mapDosagePresetToRow(p), updated_at: timestamp }))),
+    ]);
+
+    // 2. Poi salva lo snapshot atomico unificato (così il listener Realtime legge uno stato coerente)
+    const stateRes = await supabase
       .from('vending_store_state')
       .upsert({
         id: 'primary_store',
@@ -620,50 +763,14 @@ export async function pushFullDatabaseToSupabase(data: FullVendingData): Promise
         updated_at: timestamp,
       });
 
-    // 2. Salva contemporaneamente nelle tabelle relazionali normalizzate
-    const machinesPromise = data.machines.length > 0
-      ? supabase.from('vending_machines').upsert(data.machines.map(mapMachineToRow))
-      : Promise.resolve();
+    if (stateRes.error) {
+      return { success: false, error: stateRes.error.message };
+    }
 
-    const productsPromise = data.products.length > 0
-      ? supabase.from('vending_products').upsert(data.products.map(mapProductToRow))
-      : Promise.resolve();
-
-    const purchasesPromise = data.purchases.length > 0
-      ? supabase.from('vending_purchases').upsert(data.purchases.map(mapPurchaseToRow))
-      : Promise.resolve();
-
-    const historyPromise = data.restockHistory.length > 0
-      ? supabase.from('vending_restock_history').upsert(data.restockHistory.map(mapRestockToRow))
-      : Promise.resolve();
-
-    const maintenancesPromise = data.maintenances.length > 0
-      ? supabase.from('vending_maintenances').upsert(data.maintenances.map(mapMaintenanceToRow))
-      : Promise.resolve();
-
-    const fixedCostsPromise = data.fixedCosts.length > 0
-      ? supabase.from('vending_fixed_costs').upsert(data.fixedCosts.map(mapFixedCostToRow))
-      : Promise.resolve();
-
-    const trackedSpiralsPromise = data.trackedSpirals.length > 0
-      ? supabase.from('vending_tracked_spirals').upsert(data.trackedSpirals.map(mapTrackedSpiralToRow))
-      : Promise.resolve();
-
-    const dosagePresetsPromise = data.dosagePresets.length > 0
-      ? supabase.from('vending_dosage_presets').upsert(data.dosagePresets.map(mapDosagePresetToRow))
-      : Promise.resolve();
-
-    await Promise.allSettled([
-      statePromise,
-      machinesPromise,
-      productsPromise,
-      purchasesPromise,
-      historyPromise,
-      maintenancesPromise,
-      fixedCostsPromise,
-      trackedSpiralsPromise,
-      dosagePresetsPromise
-    ]);
+    const firstTableError = tableResults.find(r => r.error)?.error;
+    if (firstTableError) {
+      console.warn('[Supabase] Errore parziale su tabella relazionale (snapshot salvato):', firstTableError);
+    }
 
     return { success: true };
   } catch (err: any) {
@@ -682,48 +789,68 @@ export function subscribeToRealtimeChanges(onRemoteUpdate: () => void): () => vo
     return () => {};
   }
 
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  const triggerDebouncedUpdate = () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      onRemoteUpdate();
+    }, 350);
+  };
+
   try {
-    const channelName = `vending_sync_${Date.now()}`;
+    const channelName = `vending_sync_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const channel = supabase
       .channel(channelName)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'vending_store_state' },
-        () => {
-          onRemoteUpdate();
-        }
+        triggerDebouncedUpdate
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'vending_machines' },
-        () => {
-          onRemoteUpdate();
-        }
+        triggerDebouncedUpdate
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'vending_products' },
-        () => {
-          onRemoteUpdate();
-        }
+        triggerDebouncedUpdate
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'vending_purchases' },
-        () => {
-          onRemoteUpdate();
-        }
+        triggerDebouncedUpdate
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'vending_restock_history' },
-        () => {
-          onRemoteUpdate();
-        }
+        triggerDebouncedUpdate
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'vending_maintenances' },
+        triggerDebouncedUpdate
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'vending_fixed_costs' },
+        triggerDebouncedUpdate
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'vending_tracked_spirals' },
+        triggerDebouncedUpdate
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'vending_dosage_presets' },
+        triggerDebouncedUpdate
       )
       .subscribe();
 
     return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
       supabase.removeChannel(channel);
     };
   } catch (e) {
