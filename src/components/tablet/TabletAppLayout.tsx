@@ -24,7 +24,8 @@ import {
   ChevronDown,
   Clock,
   Upload,
-  Database
+  Database,
+  Cloud
 } from 'lucide-react';
 import { NavTab } from '../Navbar';
 import { useVending } from '../../context/VendingContext';
@@ -41,6 +42,7 @@ import { SpiralsFinancialMonitor } from '../SpiralsFinancialMonitor';
 import { AnalyticsDashboard } from '../AnalyticsDashboard';
 import { FixedCostsManager } from '../FixedCostsManager';
 import { BackupRestoreModal } from '../BackupRestoreModal';
+import { SupabaseSyncModal } from '../common/SupabaseSyncModal';
 
 interface TabletAppLayoutProps {
   currentTab: NavTab;
@@ -66,9 +68,11 @@ export const TabletAppLayout: React.FC<TabletAppLayoutProps> = ({
     products,
     resetAllDataToZero,
     checkpoints,
-    restoreCheckpoint
+    restoreCheckpoint,
+    supabaseStatus
   } = useVending();
 
+  const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
   const [showSavedToast, setShowSavedToast] = useState(false);
   const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
   const [restoreModalTab, setRestoreModalTab] = useState<'save' | 'restore'>('restore');
@@ -118,6 +122,31 @@ export const TabletAppLayout: React.FC<TabletAppLayoutProps> = ({
                 <span className="hidden sm:inline">Annulla</span>
               </button>
             )}
+
+            {/* Tasto Cloud Supabase Tablet */}
+            <button
+              type="button"
+              id="btn-tablet-supabase-sync"
+              onClick={() => setIsSupabaseModalOpen(true)}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition-all cursor-pointer active:scale-95 ${
+                supabaseStatus === 'connected'
+                  ? 'bg-emerald-950/80 border-emerald-600/70 text-emerald-300'
+                  : supabaseStatus === 'connecting'
+                  ? 'bg-amber-950/80 border-amber-600/70 text-amber-300 animate-pulse'
+                  : supabaseStatus === 'error'
+                  ? 'bg-rose-950/80 border-rose-600/70 text-rose-300'
+                  : 'bg-stone-900 border-stone-700 text-stone-400'
+              }`}
+              title="Cloud Supabase: Sincronizzazione in tempo reale"
+            >
+              <Cloud className="w-4 h-4" />
+              <span className="hidden sm:inline">Cloud</span>
+              <span className={`w-2 h-2 rounded-full ${
+                supabaseStatus === 'connected' ? 'bg-emerald-400 animate-pulse' :
+                supabaseStatus === 'connecting' ? 'bg-amber-400 animate-ping' :
+                supabaseStatus === 'error' ? 'bg-rose-400' : 'bg-stone-500'
+              }`} />
+            </button>
 
             {/* Tasto Split SALVA DATI & FRECCIA PER CARICARE DATI PRECEDENTI TABLET */}
             <div className="relative inline-flex items-stretch shadow-xs">
@@ -630,6 +659,12 @@ export const TabletAppLayout: React.FC<TabletAppLayoutProps> = ({
         isOpen={isRestoreModalOpen}
         onClose={() => setIsRestoreModalOpen(false)}
         initialTab={restoreModalTab}
+      />
+
+      {/* Modal Sincronizzazione Supabase Cloud */}
+      <SupabaseSyncModal
+        isOpen={isSupabaseModalOpen}
+        onClose={() => setIsSupabaseModalOpen(false)}
       />
     </div>
   );

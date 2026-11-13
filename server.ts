@@ -1,4 +1,5 @@
 import express from "express";
+import http from "http";
 import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
@@ -32,24 +33,20 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Istanziazione lazy dell'SDK Gemini con header User-Agent richiesto
-let aiClient: GoogleGenAI | null = null;
-function getAi(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY non configurata nel server");
-    }
-    aiClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
+// Istanziazione dell'SDK Gemini con header User-Agent richiesto
+function getAi(customApiKey?: string): GoogleGenAI {
+  const apiKey = customApiKey || process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY non configurata nel server o nella richiesta");
   }
-  return aiClient;
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      }
+    }
+  });
 }
 
 // Health check endpoint
@@ -94,7 +91,8 @@ app.post("/api/ai/parse-invoice", async (req, res) => {
     }
 
     let effectiveMime = mimeType || "application/pdf";
-    const ai = getAi();
+    const customKey = (req.headers["x-gemini-key"] as string) || req.body?.customApiKey;
+    const ai = getAi(customKey);
 
     // Sanitizza la stringa base64 rimuovendo eventuale prefisso data URL e spazi/a capo
     const base64MarkerIndex = fileBase64.indexOf(";base64,");
@@ -409,10 +407,16 @@ Restituisci esclusivamente un oggetto JSON valido conforme allo schema richiesto
 });
 
 async function startServer() {
+  const httpServer = http.createServer(app);
+
   // Vite middleware in sviluppo, file statici in produzione
   if (process.env.NODE_ENV !== "production") {
+    const isHmrDisabled = process.env.DISABLE_HMR === "true";
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: isHmrDisabled ? false : { server: httpServer },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -424,7 +428,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server gestionale vending avviato con successo sulla porta ${PORT}`);
   });
 }

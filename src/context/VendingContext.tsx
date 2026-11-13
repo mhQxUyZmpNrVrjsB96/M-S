@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { 
   VendingMachine, 
   Product, 
@@ -22,6 +22,27 @@ import { INITIAL_MACHINES, INITIAL_PRODUCTS, INITIAL_RESTOCK_HISTORY, INITIAL_PU
 import { BACKUP_PREVIOUS_SOLUTION } from '../data/savedSolutionBackup';
 import { calculateMachineStatus, consumeSlotFifo, calculateFifoLoadPlan, appendLoadedBatches, getSlotActiveCost, sortSlotsByNumericOrder, compareSlotLabelsNumeric } from '../utils/vendingUtils';
 import { parseExpiryFromText } from '../utils/expiryUtils';
+import { isSupabaseConfigured, saveCustomSupabaseCredentials, getActiveSupabaseUrl } from '../lib/supabase';
+import {
+  loadAllFromSupabase,
+  pushFullDatabaseToSupabase,
+  subscribeToRealtimeChanges,
+  saveMachineToSupabase,
+  deleteMachineFromSupabase,
+  saveProductToSupabase,
+  deleteProductFromSupabase,
+  savePurchaseToSupabase,
+  deletePurchaseFromSupabase,
+  saveRestockSessionToSupabase,
+  saveMaintenanceToSupabase,
+  deleteMaintenanceFromSupabase,
+  saveFixedCostToSupabase,
+  deleteFixedCostFromSupabase,
+  saveTrackedSpiralToSupabase,
+  saveDosagePresetToSupabase,
+  deleteDosagePresetFromSupabase,
+  FullVendingData
+} from '../services/supabaseService';
 
 export interface CreatePurchaseInput {
   productId: string;
@@ -155,6 +176,15 @@ interface VendingContextType {
   savePreviousStateBackup: (reason: string) => SaveCheckpoint;
   lastPreConfirmBackup: SaveCheckpoint | null;
   restoreLastPreConfirmBackup: () => { success: boolean; message: string };
+  // Sincronizzazione Supabase Cloud (Multi-device PC, Tablet, Smartphone)
+  supabaseStatus: 'unconfigured' | 'connecting' | 'connected' | 'error' | 'offline';
+  supabaseProjectUrl: string;
+  lastCloudSync: string | null;
+  isCloudSyncing: boolean;
+  cloudSyncError: string | null;
+  forceCloudSync: () => Promise<{ success: boolean; message: string }>;
+  saveSupabaseCredentials: (url: string, anonKey: string) => Promise<{ success: boolean; message: string }>;
+  loadFromSupabaseCloud: () => Promise<boolean>;
 }
 
 const STORAGE_KEYS = {
@@ -199,6 +229,61 @@ try {
 } catch (e) {
   // Ignora in ambienti non-browser
 }
+
+export const validateBackupPayload = (data: any): { valid: boolean; error?: string } => {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return {
+      valid: false,
+      error: 'Il file selezionato non è un backup valido di M&S Take a Management (struttura JSON non valida). Nessun dato attuale è stato modificato.'
+    };
+  }
+
+  const requiredArrays = ['machines', 'products', 'purchases', 'restockHistory'] as const;
+  const missingOrInvalid = requiredArrays.filter(key => !Array.isArray(data[key]));
+  if (missingOrInvalid.length > 0) {
+    return {
+      valid: false,
+      error: `Backup non valido o parziale: mancano o non sono liste valide i campi obbligatori (${missingOrInvalid.join(', ')}). Nessun dato attuale è stato modificato.`
+    };
+  }
+
+  for (let i = 0; i < data.machines.length; i++) {
+    const m = data.machines[i];
+    if (
+      !m ||
+      typeof m !== 'object' ||
+      typeof m.id !== 'string' ||
+      !m.id.trim() ||
+      typeof m.name !== 'string' ||
+      !m.name.trim() ||
+      !Array.isArray(m.slots)
+    ) {
+      return {
+        valid: false,
+        error: `Backup non valido: il distributore #${i + 1} non ha la struttura minima richiesta (id, name e slots come array). Nessun dato attuale è stato modificato.`
+      };
+    }
+  }
+
+  for (let i = 0; i < data.products.length; i++) {
+    const p = data.products[i];
+    if (
+      !p ||
+      typeof p !== 'object' ||
+      typeof p.id !== 'string' ||
+      !p.id.trim() ||
+      typeof p.name !== 'string' ||
+      !p.name.trim()
+    ) {
+      return {
+        valid: false,
+        error: `Backup non valido: il prodotto #${i + 1} non ha la struttura minima richiesta (id e name). Nessun dato attuale è stato modificato.`
+      };
+    }
+  }
+
+  return { valid: true };
+};
 
 const VendingContext = createContext<VendingContextType | undefined>(undefined);
 
@@ -1993,21 +2078,22 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return { success: false, message: 'Il file selezionato è vuoto.' };
       }
       const parsed = JSON.parse(jsonString);
-      const data = parsed.backupData || parsed;
+      const data = parsed?.backupData || parsed;
 
-      if (!data || (!data.machines && !data.products)) {
+      const validation = validateBackupPayload(data);
+      if (!validation.valid) {
         return {
           success: false,
-          message: 'Il file selezionato non è un backup valido di M&S Take a Management (mancano distributori o catalogo prodotti).'
+          message: validation.error || 'Il file selezionato non è un backup valido di M&S Take a Management.'
         };
       }
 
       pushUndoSnapshot('Ripristino backup da file JSON');
 
-      const restoredMachines: VendingMachine[] = Array.isArray(data.machines) ? data.machines : machines;
-      const restoredProducts: Product[] = Array.isArray(data.products) ? data.products : products;
-      const restoredPurchases: PurchaseBatch[] = Array.isArray(data.purchases) ? data.purchases : purchases;
-      const restoredHistory: RestockSession[] = Array.isArray(data.restockHistory) ? data.restockHistory : restockHistory;
+      const restoredMachines: VendingMachine[] = data.machines;
+      const restoredProducts: Product[] = data.products;
+      const restoredPurchases: PurchaseBatch[] = data.purchases;
+      const restoredHistory: RestockSession[] = data.restockHistory;
       const restoredMaintenances: MaintenanceRecord[] = Array.isArray(data.maintenances) ? data.maintenances : maintenances;
       const restoredFixedCosts: FixedCost[] = Array.isArray(data.fixedCosts) ? data.fixedCosts : fixedCosts;
       const restoredTrackedSpirals: TrackedSpiralRecord[] = Array.isArray(data.trackedSpirals) ? data.trackedSpirals : trackedSpirals;
@@ -2057,7 +2143,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         message: `Errore nella lettura del file: ${err?.message || 'Formato JSON non valido'}`
       };
     }
-  }, [pushUndoSnapshot, machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
+  }, [pushUndoSnapshot, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
 
   const getLastLocalBackupInfo = useCallback(() => {
     try {
@@ -2205,6 +2291,19 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setCheckpoints(updatedCheckpoints);
       setLastSavedAt(timestamp);
 
+      // Sincronizza contemporaneamente nel database PostgreSQL Supabase nel cloud
+      if (isSupabaseConfigured()) {
+        pushFullDatabaseToSupabase(snapshotData).then(res => {
+          if (res.success) {
+            setLastCloudSync(timestamp);
+            setSupabaseStatus('connected');
+            setCloudSyncError(null);
+          }
+        }).catch(err => {
+          console.warn('[Supabase saveAllDataNow error]', err);
+        });
+      }
+
       return {
         success: true,
         timestamp,
@@ -2274,6 +2373,222 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
     return restoreCheckpoint(lastPreConfirmBackup.id);
   }, [lastPreConfirmBackup, restoreCheckpoint]);
+
+  // -------------------------------------------------------------
+  // Integrazione Supabase Cloud (Multi-device PC, Tablet, Smartphone)
+  // -------------------------------------------------------------
+  const [supabaseStatus, setSupabaseStatus] = useState<'unconfigured' | 'connecting' | 'connected' | 'error' | 'offline'>(() => {
+    return isSupabaseConfigured() ? 'connecting' : 'unconfigured';
+  });
+  const [supabaseProjectUrl, setSupabaseProjectUrl] = useState<string>(() => getActiveSupabaseUrl());
+  const [lastCloudSync, setLastCloudSync] = useState<string | null>(null);
+  const [isCloudSyncing, setIsCloudSyncing] = useState<boolean>(false);
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+
+  const isRemoteSyncingRef = useRef(false);
+  const initialLoadDoneRef = useRef(false);
+
+  // Caricamento completo da Supabase (con sincronizzazione e sanificazione)
+  const loadFromSupabaseCloud = useCallback(async (): Promise<boolean> => {
+    if (!isSupabaseConfigured()) {
+      setSupabaseStatus('unconfigured');
+      return false;
+    }
+
+    setIsCloudSyncing(true);
+    setSupabaseStatus('connecting');
+    try {
+      const res = await loadAllFromSupabase();
+      if (res.success && res.data) {
+        const d = res.data;
+        const hasRemoteData = (d.machines && d.machines.length > 0) || (d.products && d.products.length > 0) || (d.purchases && d.purchases.length > 0);
+
+        if (hasRemoteData) {
+          isRemoteSyncingRef.current = true;
+          if (Array.isArray(d.machines) && d.machines.length > 0) {
+            setMachines(d.machines.map(m => ({
+              ...m,
+              slots: Array.isArray(m.slots) ? sortSlotsByNumericOrder(m.slots) : [],
+              cashBalance: m.cashBalance ?? 0,
+              posBalance: m.posBalance ?? 0,
+              coffeeCounterCurrent: m.coffeeCounterCurrent ?? 0,
+              coffeeCounterLastRestock: m.coffeeCounterLastRestock ?? 0,
+            })));
+          }
+          if (Array.isArray(d.products)) setProducts(d.products);
+          if (Array.isArray(d.purchases)) setPurchases(d.purchases);
+          if (Array.isArray(d.restockHistory)) setRestockHistory(d.restockHistory);
+          if (Array.isArray(d.maintenances)) setMaintenances(d.maintenances);
+          if (Array.isArray(d.fixedCosts)) setFixedCosts(d.fixedCosts);
+          if (Array.isArray(d.trackedSpirals)) setTrackedSpirals(d.trackedSpirals);
+          if (Array.isArray(d.dosagePresets)) setDosagePresets(d.dosagePresets);
+
+          const syncTime = d.lastUpdated || new Date().toISOString();
+          setLastCloudSync(syncTime);
+          setSupabaseStatus('connected');
+          setCloudSyncError(null);
+          setTimeout(() => {
+            isRemoteSyncingRef.current = false;
+          }, 1500);
+          return true;
+        } else {
+          // Supabase non ha ancora dati o è stato appena creato: effettua la prima migrazione del gestionale
+          if (machines.length > 0 || products.length > 0) {
+            await pushFullDatabaseToSupabase({
+              machines,
+              products,
+              purchases,
+              restockHistory,
+              maintenances,
+              fixedCosts,
+              trackedSpirals,
+              dosagePresets,
+            });
+          }
+          setSupabaseStatus('connected');
+          setCloudSyncError(null);
+          setLastCloudSync(new Date().toISOString());
+          return true;
+        }
+      } else {
+        setSupabaseStatus('error');
+        setCloudSyncError(res.error || 'Errore di sincronizzazione con Supabase');
+        return false;
+      }
+    } catch (err: any) {
+      setSupabaseStatus('error');
+      setCloudSyncError(err?.message || 'Connessione a Supabase fallita');
+      return false;
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
+
+  // Forza sincronizzazione manuale di tutto il database su Supabase
+  const forceCloudSync = useCallback(async (): Promise<{ success: boolean; message: string }> => {
+    if (!isSupabaseConfigured()) {
+      return { success: false, message: 'Supabase non configurato. Inserisci URL e Anon Key nella schermata di configurazione.' };
+    }
+    setIsCloudSyncing(true);
+    try {
+      const res = await pushFullDatabaseToSupabase({
+        machines,
+        products,
+        purchases,
+        restockHistory,
+        maintenances,
+        fixedCosts,
+        trackedSpirals,
+        dosagePresets,
+      });
+
+      if (res.success) {
+        const time = new Date().toISOString();
+        setLastCloudSync(time);
+        setSupabaseStatus('connected');
+        setCloudSyncError(null);
+        return {
+          success: true,
+          message: `Dati sincronizzati con successo su Supabase alle ${new Date(time).toLocaleTimeString('it-IT')}`
+        };
+      } else {
+        setSupabaseStatus('error');
+        setCloudSyncError(res.error || 'Errore durante la sincronizzazione');
+        return {
+          success: false,
+          message: res.error || 'Errore durante il salvataggio su Supabase'
+        };
+      }
+    } catch (e: any) {
+      setSupabaseStatus('error');
+      setCloudSyncError(e?.message || 'Errore imprevisto');
+      return { success: false, message: e?.message || 'Errore di connessione a Supabase' };
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
+
+  // Salvataggio credenziali Supabase (URL + Anon Key) da interfaccia utente
+  const saveSupabaseCredentials = useCallback(async (url: string, anonKey: string): Promise<{ success: boolean; message: string }> => {
+    try {
+      saveCustomSupabaseCredentials(url, anonKey);
+      setSupabaseProjectUrl(url.trim());
+      if (!url.trim() || !anonKey.trim()) {
+        setSupabaseStatus('unconfigured');
+        return { success: true, message: 'Credenziali Supabase rimosse.' };
+      }
+      setSupabaseStatus('connecting');
+      const ok = await loadFromSupabaseCloud();
+      if (ok) {
+        return { success: true, message: 'Connessione al database Supabase stabilita con successo!' };
+      } else {
+        const pushRes = await forceCloudSync();
+        if (pushRes.success) {
+          return { success: true, message: 'Connessione a Supabase stabilita e dati inizializzati!' };
+        }
+        return { success: false, message: cloudSyncError || 'Impossibile completare la connessione a Supabase. Verifica le chiavi e le policy RLS.' };
+      }
+    } catch (err: any) {
+      setSupabaseStatus('error');
+      return { success: false, message: err?.message || 'Errore durante la verifica delle credenziali' };
+    }
+  }, [loadFromSupabaseCloud, forceCloudSync, cloudSyncError]);
+
+  // Ascolto in tempo reale (Supabase Realtime) per sincronizzazione multi-device (PC, Tablet, Smartphone)
+  useEffect(() => {
+    if (!isSupabaseConfigured()) {
+      setSupabaseStatus('unconfigured');
+      return;
+    }
+
+    // Carica dati remoti all'avvio
+    if (!initialLoadDoneRef.current) {
+      initialLoadDoneRef.current = true;
+      loadFromSupabaseCloud();
+    }
+
+    // Sottoscrizione realtime ai canali PostgreSQL
+    const unsubscribe = subscribeToRealtimeChanges(() => {
+      // Quando un altro device modifica i dati, aggiorna istantaneamente questo client
+      if (!isRemoteSyncingRef.current) {
+        loadFromSupabaseCloud();
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [loadFromSupabaseCloud]);
+
+  // Auto-sync debounced verso Supabase su ogni modifica locale
+  useEffect(() => {
+    if (!isSupabaseConfigured() || isRemoteSyncingRef.current || !initialLoadDoneRef.current) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      pushFullDatabaseToSupabase({
+        machines,
+        products,
+        purchases,
+        restockHistory,
+        maintenances,
+        fixedCosts,
+        trackedSpirals,
+        dosagePresets,
+      }).then(res => {
+        if (res.success) {
+          setLastCloudSync(new Date().toISOString());
+          setSupabaseStatus('connected');
+          setCloudSyncError(null);
+        }
+      }).catch(err => {
+        console.warn('[Supabase auto-sync]', err);
+      });
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
 
   const canUndo = undoStack.length > 0;
   const lastActionName = undoStack[0]?.actionName || null;
@@ -2353,6 +2668,14 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         savePreviousStateBackup,
         lastPreConfirmBackup,
         restoreLastPreConfirmBackup,
+        supabaseStatus,
+        supabaseProjectUrl,
+        lastCloudSync,
+        isCloudSyncing,
+        cloudSyncError,
+        forceCloudSync,
+        saveSupabaseCredentials,
+        loadFromSupabaseCloud,
       }}
     >
       {children}

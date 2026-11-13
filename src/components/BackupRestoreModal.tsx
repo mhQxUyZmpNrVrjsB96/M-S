@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { useVending } from '../context/VendingContext';
+import { useVending, validateBackupPayload } from '../context/VendingContext';
 import { 
   Upload, 
   Database, 
@@ -55,11 +55,15 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   const [activeTab, setActiveTab] = useState<'save' | 'restore'>(initialTab);
   const [saveNote, setSaveNote] = useState('');
   const [confirmRestoreCheckpointId, setConfirmRestoreCheckpointId] = useState<string | null>(null);
+  const [confirmRestoreFile, setConfirmRestoreFile] = useState(false);
+  const [confirmRestoreLocal, setConfirmRestoreLocal] = useState(false);
 
   // Sincronizza il tab attivo quando il modal viene aperto con initialTab specifico
   React.useEffect(() => {
     if (isOpen) {
       setActiveTab(initialTab);
+      setConfirmRestoreFile(false);
+      setConfirmRestoreLocal(false);
     }
   }, [isOpen, initialTab]);
 
@@ -124,6 +128,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setErrorMsg(null);
     setSuccessMsg(null);
+    setConfirmRestoreFile(false);
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -133,26 +138,29 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     reader.onload = (event) => {
       try {
         const text = event.target?.result as string;
-        setFileContent(text);
         const parsed = JSON.parse(text);
-        const data = parsed.backupData || parsed;
+        const data = parsed?.backupData || parsed;
 
-        if (!data.machines && !data.products) {
-          setErrorMsg('Il file selezionato non contiene la struttura di backup prevista (mancano distributori o catalogo).');
+        const validation = validateBackupPayload(data);
+        if (!validation.valid) {
+          setErrorMsg(validation.error || 'Il file selezionato non contiene una struttura di backup valida.');
+          setFileContent(null);
           setPreviewData(null);
           return;
         }
 
+        setFileContent(text);
         setPreviewData({
           exportDate: data.exportDate,
-          machinesCount: Array.isArray(data.machines) ? data.machines.length : 0,
-          productsCount: Array.isArray(data.products) ? data.products.length : 0,
-          purchasesCount: Array.isArray(data.purchases) ? data.purchases.length : 0,
-          historyCount: Array.isArray(data.restockHistory) ? data.restockHistory.length : 0,
+          machinesCount: data.machines.length,
+          productsCount: data.products.length,
+          purchasesCount: data.purchases.length,
+          historyCount: data.restockHistory.length,
           storeName: data.storeName || 'M&S Negozio H24'
         });
       } catch (err: any) {
         setErrorMsg('Impossibile leggere il file JSON: ' + (err?.message || 'formato non valido'));
+        setFileContent(null);
         setPreviewData(null);
       }
     };
@@ -170,6 +178,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     setTimeout(() => {
       const res = importBackupJSON(fileContent);
       setIsProcessing(false);
+      setConfirmRestoreFile(false);
       if (res.success) {
         setSuccessMsg(res.message);
         setTimeout(() => {
@@ -187,6 +196,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     setTimeout(() => {
       const res = restoreLastLocalBackup();
       setIsProcessing(false);
+      setConfirmRestoreLocal(false);
       if (res.success) {
         setSuccessMsg(res.message);
         setTimeout(() => {
@@ -533,6 +543,8 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                           setSelectedFile(null);
                           setFileContent(null);
                           setPreviewData(null);
+                          setConfirmRestoreFile(false);
+                          setErrorMsg(null);
                           if (fileInputRef.current) fileInputRef.current.value = '';
                         }}
                         className="text-stone-400 hover:text-stone-200 text-xs underline cursor-pointer"
@@ -547,7 +559,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                         <div className="flex justify-between text-stone-400">
                           <span>Data di Creazione Backup:</span>
                           <span className="text-amber-300 font-semibold">
-                            {previewData.exportDate ? new Date(previewData.exportDate).toLocaleString('it-IT') : 'Recente'}
+                            {previewData.exportDate ? new Date(previewData.exportDate).toLocaleString('it-IT') : 'Non specificata'}
                           </span>
                         </div>
                         <div className="grid grid-cols-2 gap-2 pt-1 border-t border-stone-800/80">
@@ -559,15 +571,51 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                       </div>
                     )}
 
-                    <button
-                      type="button"
-                      disabled={!fileContent || isProcessing}
-                      onClick={handleConfirmRestore}
-                      className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-2 cursor-pointer shadow-md transition-colors"
-                    >
-                      <Check className="w-4 h-4" />
-                      <span>{isProcessing ? 'Ripristino in corso...' : 'Conferma e Ripristina Questo Backup'}</span>
-                    </button>
+                    {confirmRestoreFile && previewData ? (
+                      <div className="p-3 rounded-lg bg-rose-950/80 border border-rose-600 space-y-2">
+                        <div className="flex items-start gap-2 text-rose-200 text-2xs">
+                          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                          <div>
+                            <p className="font-bold text-rose-300">Confermi il ripristino del backup da file?</p>
+                            <p className="mt-0.5">
+                              Data backup: <strong className="text-white">{previewData.exportDate ? new Date(previewData.exportDate).toLocaleString('it-IT') : 'Non specificata'}</strong> •{' '}
+                              <strong className="text-white">{previewData.machinesCount}</strong> distributori •{' '}
+                              <strong className="text-white">{previewData.productsCount}</strong> prodotti •{' '}
+                              <strong className="text-white">{previewData.purchasesCount}</strong> lotti.
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            disabled={isProcessing}
+                            onClick={() => setConfirmRestoreFile(false)}
+                            className="px-3 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-300 rounded-lg text-2xs font-semibold cursor-pointer"
+                          >
+                            Annulla
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isProcessing}
+                            onClick={handleConfirmRestore}
+                            className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-2xs font-bold flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>{isProcessing ? 'Ripristino in corso...' : 'Sì, Conferma Ripristino'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={!fileContent || !previewData || isProcessing}
+                        onClick={() => setConfirmRestoreFile(true)}
+                        className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-2 cursor-pointer shadow-md transition-colors"
+                      >
+                        <Check className="w-4 h-4" />
+                        <span>Ripristina Questo Backup</span>
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -586,19 +634,55 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                   </div>
 
                   <p className="text-2xs text-stone-400">
-                    Data salvataggio: <strong className="text-stone-200">{localBackupInfo.timestamp ? new Date(localBackupInfo.timestamp).toLocaleString('it-IT') : 'Poco fa'}</strong>
+                    Data salvataggio: <strong className="text-stone-200">{(localBackupInfo.exportDate || localBackupInfo.timestamp) ? new Date(localBackupInfo.exportDate || localBackupInfo.timestamp).toLocaleString('it-IT') : 'Non specificata'}</strong>
                     {' '}• {localBackupInfo.machinesCount} distributori • {localBackupInfo.productsCount} prodotti • {localBackupInfo.purchasesCount} lotti.
                   </p>
 
-                  <button
-                    type="button"
-                    disabled={isProcessing}
-                    onClick={handleRestoreLocal}
-                    className="w-full py-2 px-3 bg-stone-800 hover:bg-stone-700 text-amber-200 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Ripristina da Memoria Locale Browser</span>
-                  </button>
+                  {confirmRestoreLocal ? (
+                    <div className="p-3 rounded-lg bg-rose-950/80 border border-rose-600 space-y-2">
+                      <div className="flex items-start gap-2 text-rose-200 text-2xs">
+                        <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-bold text-rose-300">Confermi il ripristino dalla memoria locale?</p>
+                          <p className="mt-0.5">
+                            Data backup: <strong className="text-white">{(localBackupInfo.exportDate || localBackupInfo.timestamp) ? new Date(localBackupInfo.exportDate || localBackupInfo.timestamp).toLocaleString('it-IT') : 'Non specificata'}</strong> •{' '}
+                            <strong className="text-white">{localBackupInfo.machinesCount}</strong> distributori •{' '}
+                            <strong className="text-white">{localBackupInfo.productsCount}</strong> prodotti •{' '}
+                            <strong className="text-white">{localBackupInfo.purchasesCount}</strong> lotti.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          disabled={isProcessing}
+                          onClick={() => setConfirmRestoreLocal(false)}
+                          className="px-3 py-1.5 bg-stone-800 hover:bg-stone-700 text-stone-300 rounded-lg text-2xs font-semibold cursor-pointer"
+                        >
+                          Annulla
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isProcessing}
+                          onClick={handleRestoreLocal}
+                          className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-2xs font-bold flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>{isProcessing ? 'Ripristino in corso...' : 'Sì, Conferma Ripristino'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isProcessing}
+                      onClick={() => setConfirmRestoreLocal(true)}
+                      className="w-full py-2 px-3 bg-stone-800 hover:bg-stone-700 text-amber-200 border border-amber-500/30 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Ripristina da Memoria Locale Browser</span>
+                    </button>
+                  )}
                 </div>
               )}
 

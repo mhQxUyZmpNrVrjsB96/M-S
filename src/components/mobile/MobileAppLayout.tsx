@@ -13,11 +13,13 @@ import {
   ChevronDown,
   Clock,
   Upload,
-  Database
+  Database,
+  Cloud
 } from 'lucide-react';
 import { NavTab } from '../Navbar';
 import { useVending } from '../../context/VendingContext';
 import { BackupRestoreModal } from '../BackupRestoreModal';
+import { SupabaseSyncModal } from '../common/SupabaseSyncModal';
 import { MobileBottomNav } from './MobileBottomNav';
 import { MobileMoreDrawer } from './MobileMoreDrawer';
 import { MobileQuickRestock } from './MobileQuickRestock';
@@ -52,9 +54,11 @@ export const MobileAppLayout: React.FC<MobileAppLayoutProps> = ({
     exportBackupJSON,
     saveAllDataNow,
     checkpoints,
-    restoreCheckpoint
+    restoreCheckpoint,
+    supabaseStatus
   } = useVending();
 
+  const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [showSavedToast, setShowSavedToast] = useState(false);
   const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false);
@@ -97,6 +101,30 @@ export const MobileAppLayout: React.FC<MobileAppLayoutProps> = ({
                 <Undo2 className="w-4 h-4" />
               </button>
             )}
+
+            {/* Tasto Cloud Supabase Mobile */}
+            <button
+              type="button"
+              id="btn-mobile-supabase-sync"
+              onClick={() => setIsSupabaseModalOpen(true)}
+              className={`p-2 rounded-xl border cursor-pointer active:scale-95 transition-all flex items-center justify-center relative ${
+                supabaseStatus === 'connected'
+                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600/70'
+                  : supabaseStatus === 'connecting'
+                  ? 'bg-amber-950/80 text-amber-300 border-amber-600/70 animate-pulse'
+                  : supabaseStatus === 'error'
+                  ? 'bg-rose-950/80 text-rose-300 border-rose-600/70'
+                  : 'bg-stone-900 text-stone-400 border-stone-700/80'
+              }`}
+              title="Cloud Supabase: Sincronizzazione in tempo reale"
+            >
+              <Cloud className="w-4 h-4" />
+              <span className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-stone-950 ${
+                supabaseStatus === 'connected' ? 'bg-emerald-400 animate-pulse' :
+                supabaseStatus === 'connecting' ? 'bg-amber-400 animate-ping' :
+                supabaseStatus === 'error' ? 'bg-rose-400' : 'bg-stone-500'
+              }`} />
+            </button>
 
             {/* Tasto Salva Dati Istantaneo */}
             <button
@@ -232,6 +260,19 @@ export const MobileAppLayout: React.FC<MobileAppLayoutProps> = ({
         onSelectTab={onSelectTab}
         onSwitchToDesktop={onSwitchToDesktop}
         onSwitchToTablet={onSwitchToTablet}
+      />
+
+      {/* Modal Ripristino Backup */}
+      <BackupRestoreModal
+        isOpen={isRestoreModalOpen}
+        onClose={() => setIsRestoreModalOpen(false)}
+        initialTab={restoreModalTab}
+      />
+
+      {/* Modal Sincronizzazione Supabase Cloud */}
+      <SupabaseSyncModal
+        isOpen={isSupabaseModalOpen}
+        onClose={() => setIsSupabaseModalOpen(false)}
       />
     </div>
   );

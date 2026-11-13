@@ -28,12 +28,14 @@ import {
   Upload,
   Save,
   Check,
-  Clock
+  Clock,
+  Cloud
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
 import { MuralBrandLogo } from './MuralBrandLogo';
 import { getExpirySummary } from '../utils/expiryUtils';
 import { BackupRestoreModal } from './BackupRestoreModal';
+import { SupabaseSyncModal } from './common/SupabaseSyncModal';
 
 export type NavTab = 
   | 'quick_restock' 
@@ -76,9 +78,11 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab, onSwitc
     saveAllDataNow,
     lastSavedAt,
     checkpoints,
-    restoreCheckpoint
+    restoreCheckpoint,
+    supabaseStatus
   } = useVending();
 
+  const [isSupabaseModalOpen, setIsSupabaseModalOpen] = useState(false);
   const [isSaveMenuOpen, setIsSaveMenuOpen] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [isVersionMenuOpen, setIsVersionMenuOpen] = useState(false);
@@ -232,6 +236,30 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab, onSwitc
                 </div>
               )}
             </div>
+
+            {/* Tasto Cloud Supabase (Stato sync & configurazione multi-device) */}
+            <button
+              id="btn-supabase-sync-modal"
+              onClick={() => setIsSupabaseModalOpen(true)}
+              className={`inline-flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-all cursor-pointer ${
+                supabaseStatus === 'connected'
+                  ? 'bg-emerald-950/70 border-emerald-600/70 text-emerald-300 hover:bg-emerald-900/80 shadow-xs'
+                  : supabaseStatus === 'connecting'
+                  ? 'bg-amber-950/70 border-amber-600/70 text-amber-300 hover:bg-amber-900/80 animate-pulse'
+                  : supabaseStatus === 'error'
+                  ? 'bg-rose-950/70 border-rose-600/70 text-rose-300 hover:bg-rose-900/80'
+                  : 'bg-stone-900 border-stone-700/80 text-stone-400 hover:text-stone-200'
+              }`}
+              title="Cloud Supabase: Sincronizzazione in tempo reale PC, Tablet, Smartphone"
+            >
+              <Cloud className="w-3.5 h-3.5" />
+              <span className="hidden xl:inline">Cloud Supabase</span>
+              <span className={`w-2 h-2 rounded-full ${
+                supabaseStatus === 'connected' ? 'bg-emerald-400 animate-pulse' :
+                supabaseStatus === 'connecting' ? 'bg-amber-400 animate-ping' :
+                supabaseStatus === 'error' ? 'bg-rose-400' : 'bg-stone-500'
+              }`} />
+            </button>
 
             {/* Tasto Split SALVA DATI & FRECCIA PER CARICARE DATI PRECEDENTI */}
             <div className="relative inline-flex items-stretch shadow-xs">
@@ -777,6 +805,12 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab, onSwitc
         isOpen={isRestoreModalOpen} 
         onClose={() => setIsRestoreModalOpen(false)} 
         initialTab={restoreModalTab}
+      />
+
+      {/* Modale Sincronizzazione Supabase Cloud */}
+      <SupabaseSyncModal 
+        isOpen={isSupabaseModalOpen} 
+        onClose={() => setIsSupabaseModalOpen(false)} 
       />
     </header>
   );
