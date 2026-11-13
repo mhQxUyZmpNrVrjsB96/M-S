@@ -155,7 +155,7 @@ export const TabletAppLayout: React.FC<TabletAppLayoutProps> = ({
     <div className="min-h-screen bg-cosmic-nebula text-stone-100 flex flex-col font-sans antialiased selection:bg-amber-500 selection:text-stone-950 pb-20">
       {/* 1. HEADER + NAVIGAZIONE DEDICATI TABLET (Puliti, con menu a tendina e senza sovrapposizioni) */}
       <header ref={headerRef} className="sticky top-0 z-40 bg-stone-950/95 backdrop-blur-md border-b border-stone-800 shadow-xl">
-        <div className="max-w-6xl mx-auto px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
           {/* Logo & Brand Tablet */}
           <div className="flex items-center gap-3 shrink-0">
             <div className="w-9 h-9 rounded-xl bg-stone-900 border border-amber-500/60 flex items-center justify-center shadow-sm shrink-0">
