@@ -4,6 +4,7 @@ import {
   Product, 
   RestockSession, 
   RestockItemRecord, 
+  RestockItemBatchConsumption,
   PurchaseBatch, 
   MachineSlot, 
   SlotLoadedBatch, 
@@ -20,7 +21,7 @@ import {
 } from '../types';
 import { INITIAL_MACHINES, INITIAL_PRODUCTS, INITIAL_RESTOCK_HISTORY, INITIAL_PURCHASES, DEFAULT_FIXED_COSTS, DEFAULT_COFFEE_DOSAGE_PRESETS } from '../data/initialData';
 import { BACKUP_PREVIOUS_SOLUTION } from '../data/savedSolutionBackup';
-import { calculateMachineStatus, consumeSlotFifo, calculateFifoLoadPlan, appendLoadedBatches, getSlotActiveCost, sortSlotsByNumericOrder, compareSlotLabelsNumeric } from '../utils/vendingUtils';
+import { calculateMachineStatus, consumeSlotFifo, calculateFifoLoadPlan, appendLoadedBatches, getSlotActiveCost, sortSlotsByNumericOrder, compareSlotLabelsNumeric, oggiLocale, costoUnitarioLotto, roundUnitCost } from '../utils/vendingUtils';
 import { parseExpiryFromText } from '../utils/expiryUtils';
 import { isSupabaseConfigured, saveCustomSupabaseCredentials, getActiveSupabaseUrl } from '../lib/supabase';
 import {
@@ -71,6 +72,9 @@ export interface StateSnapshot {
   purchases: PurchaseBatch[];
   restockHistory: RestockSession[];
   maintenances: MaintenanceRecord[];
+  fixedCosts: FixedCost[];
+  trackedSpirals: TrackedSpiralRecord[];
+  dosagePresets: CoffeeDosagePreset[];
 }
 
 export interface UndoToastInfo {
@@ -92,7 +96,7 @@ interface VendingContextType {
   activeModalMachineId: string | null;
   openRestockModal: (machineId?: string) => void;
   closeRestockModal: () => void;
-  recordRestock: (session: Omit<RestockSession, 'id' | 'timestamp'>) => void;
+  recordRestock: (session: Omit<RestockSession, 'id' | 'timestamp'>) => SaveCheckpoint;
   addPurchase: (input: CreatePurchaseInput) => void;
   deletePurchase: (id: string) => void;
   updateBatchUnits: (batchId: string, newRemainingUnits: number) => void;
@@ -119,11 +123,24 @@ interface VendingContextType {
       date?: string;
     }
   ) => void;
-  deleteProduct: (productId: string) => void;
+  deleteProduct: (productId: string) => {
+    success: boolean;
+    message?: string;
+    usedIn?: Array<{ machineCode: string; machineName: string; slotLabel: string }>;
+    checkpointId?: string;
+  };
   clearAllProducts: () => void;
   clearAllPurchases: () => void;
   updateMachineSlot: (machineId: string, slotId: string, updates: Partial<{ label: string; productId: string; salePrice: number; alertThreshold: number; capacity: number }>) => void;
-  updateMachineSpirals: (machineId: string, updates: SpiralConfigUpdate[], newSlotOrderIds?: string[]) => void;
+  updateMachineSpirals: (
+    machineId: string,
+    updates: SpiralConfigUpdate[],
+    newSlotOrderIds?: string[],
+    options?: {
+      deletedSlots?: Array<{ slotId: string; disposition?: 'warehouse' | 'loss' }>;
+      newSlots?: Omit<MachineSlot, 'id'>[];
+    }
+  ) => void;
   moveSlotPosition: (machineId: string, slotId: string, direction: 'up' | 'down') => void;
   changeSlotIndex: (machineId: string, slotId: string, targetIndex: number) => void;
   reorderMachineSlots: (machineId: string, orderedSlotIds: string[]) => void;
@@ -185,6 +202,8 @@ interface VendingContextType {
   forceCloudSync: () => Promise<{ success: boolean; message: string }>;
   saveSupabaseCredentials: (url: string, anonKey: string) => Promise<{ success: boolean; message: string }>;
   loadFromSupabaseCloud: () => Promise<boolean>;
+  storageSaveError: boolean;
+  lastSaveSucceeded: boolean;
 }
 
 const STORAGE_KEYS = {
@@ -293,7 +312,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const saved = localStorage.getItem(STORAGE_KEYS.MACHINES);
       if (saved) {
         const parsed: VendingMachine[] = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length >= 3 && parsed[0]?.id === 'mach-01') {
+        if (Array.isArray(parsed)) {
           return parsed.map(m => ({
             ...m,
             slots: Array.isArray(m.slots) ? sortSlotsByNumericOrder(m.slots) : [],
@@ -436,6 +455,127 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return null;
   });
 
+  // Stato salvataggio sicuro localStorage
+  const [storageSaveError, setStorageSaveError] = useState<boolean>(false);
+  const [lastSaveSucceeded, setLastSaveSucceeded] = useState<boolean>(true);
+  const failedStorageKeysRef = useRef<Set<string>>(new Set());
+
+  const safeSetItem = useCallback((key: string, value: string): boolean => {
+    try {
+      localStorage.setItem(key, value);
+      failedStorageKeysRef.current.delete(key);
+      if (key !== STORAGE_KEYS.CHECKPOINTS && !localStorage.getItem(STORAGE_KEYS.CHECKPOINTS)) {
+        failedStorageKeysRef.current.delete(STORAGE_KEYS.CHECKPOINTS);
+      }
+      if (failedStorageKeysRef.current.size === 0) {
+        setStorageSaveError(false);
+        setLastSaveSucceeded(true);
+      }
+      return true;
+    } catch (err) {
+      try {
+        let currentCheckpoints: SaveCheckpoint[] = [];
+        if (key === STORAGE_KEYS.CHECKPOINTS) {
+          try {
+            const parsed = JSON.parse(value);
+            if (Array.isArray(parsed)) currentCheckpoints = parsed;
+          } catch {
+            currentCheckpoints = [];
+          }
+        } else {
+          const rawCp = localStorage.getItem(STORAGE_KEYS.CHECKPOINTS);
+          if (rawCp) {
+            try {
+              const parsed = JSON.parse(rawCp);
+              if (Array.isArray(parsed)) currentCheckpoints = parsed;
+            } catch {
+              currentCheckpoints = [];
+            }
+          }
+        }
+
+        if (currentCheckpoints.length > 0) {
+          const working = [...currentCheckpoints];
+          while (working.length > 0) {
+            let oldestIdx = working.length - 1;
+            let oldestTime = new Date(working[oldestIdx]?.timestamp || 0).getTime();
+            for (let i = 0; i < working.length - 1; i++) {
+              const t = new Date(working[i]?.timestamp || 0).getTime();
+              if (Number.isFinite(t) && (!Number.isFinite(oldestTime) || t < oldestTime)) {
+                oldestTime = t;
+                oldestIdx = i;
+              }
+            }
+            working.splice(oldestIdx, 1);
+
+            if (key === STORAGE_KEYS.CHECKPOINTS) {
+              if (working.length === 0) {
+                try {
+                  localStorage.removeItem(STORAGE_KEYS.CHECKPOINTS);
+                } catch {
+                  // ignore
+                }
+                setCheckpoints([]);
+                break;
+              }
+              try {
+                localStorage.setItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(working));
+                setCheckpoints(working);
+                failedStorageKeysRef.current.delete(key);
+                if (failedStorageKeysRef.current.size === 0) {
+                  setStorageSaveError(false);
+                  setLastSaveSucceeded(true);
+                }
+                return true;
+              } catch {
+                // Continua rimuovendo il checkpoint più vecchio successivo
+              }
+            } else {
+              try {
+                if (working.length > 0) {
+                  localStorage.setItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(working));
+                } else {
+                  localStorage.removeItem(STORAGE_KEYS.CHECKPOINTS);
+                }
+                setCheckpoints(working);
+              } catch {
+                try {
+                  localStorage.removeItem(STORAGE_KEYS.CHECKPOINTS);
+                  setCheckpoints([]);
+                } catch {
+                  // ignore
+                }
+              }
+
+              try {
+                localStorage.setItem(key, value);
+                failedStorageKeysRef.current.delete(key);
+                if (!localStorage.getItem(STORAGE_KEYS.CHECKPOINTS)) {
+                  failedStorageKeysRef.current.delete(STORAGE_KEYS.CHECKPOINTS);
+                }
+                if (failedStorageKeysRef.current.size === 0) {
+                  setStorageSaveError(false);
+                  setLastSaveSucceeded(true);
+                }
+                return true;
+              } catch {
+                // Continua rimuovendo il checkpoint più vecchio successivo
+              }
+            }
+          }
+        }
+      } catch (cleanupErr) {
+        console.error('Errore durante pulizia checkpoint:', cleanupErr);
+      }
+
+      console.error(`Salvataggio localStorage fallito per "${key}":`, err);
+      failedStorageKeysRef.current.add(key);
+      setStorageSaveError(true);
+      setLastSaveSucceeded(false);
+      return false;
+    }
+  }, []);
+
   // Modalità Versione Applicazione (v1.5 Classica senza AI vs v2.0 Con Scanner AI PDF)
   const [appVersionMode, setAppVersionModeState] = useState<AppVersionMode>(() => {
     try {
@@ -449,11 +589,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const setAppVersionMode = (mode: AppVersionMode) => {
     setAppVersionModeState(mode);
-    try {
-      localStorage.setItem('vending_app_version_mode_choice', mode);
-    } catch (e) {
-      // ignore
-    }
+    safeSetItem('vending_app_version_mode_choice', mode);
   };
 
   // Undo Stack State
@@ -469,7 +605,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return () => clearTimeout(timer);
   }, [undoToast]);
 
-  // Riconciliazione automatica per sanare eventuali lotti o spirali con costi fittizi (0.20) o mancanti
+  // Riconciliazione automatica per inizializzare eventuali spirali con scorte prive di lotti caricati
   useEffect(() => {
     let machinesChanged = false;
     const healedMachines = machines.map(m => {
@@ -478,23 +614,20 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const prod = products.find(p => p.id === slot.productId) || products.find(p => p.name.toLowerCase() === slot.label.toLowerCase());
         const matchingPurchases = purchases.filter(p => p.productId === slot.productId || (prod && p.productId === prod.id));
         const activePurchase = matchingPurchases.find(p => p.remainingUnits > 0) || matchingPurchases[0];
-        const realCost = activePurchase 
-          ? (activePurchase.costBasisUsed === 'ivato' ? activePurchase.unitCostWithVat : activePurchase.unitCostNet)
+        const realCost = activePurchase
+          ? costoUnitarioLotto(activePurchase)
           : (prod?.unitCost && prod.unitCost > 0 ? prod.unitCost : 0);
 
-        const hasStale020 = slot.loadedBatches && slot.loadedBatches.some(b => b.unitCost === 0.20 || b.unitCost === 0.2);
         const isEmptyWithStock = (!slot.loadedBatches || slot.loadedBatches.length === 0) && slot.currentStock > 0;
 
-        if (realCost > 0 && (hasStale020 || isEmptyWithStock)) {
+        if (realCost > 0 && isEmptyWithStock) {
           slotChanged = true;
-          const healedBatches: SlotLoadedBatch[] = (slot.loadedBatches && slot.loadedBatches.length > 0 && !isEmptyWithStock)
-            ? slot.loadedBatches.map(b => (b.unitCost === 0.20 || b.unitCost === 0.2) ? { ...b, unitCost: realCost, batchNumber: activePurchase?.batchNumber || b.batchNumber } : b)
-            : [{
-                batchId: activePurchase?.id,
-                batchNumber: activePurchase?.batchNumber || 'Lotto Attivo',
-                unitCost: realCost,
-                units: slot.currentStock,
-              }];
+          const healedBatches: SlotLoadedBatch[] = [{
+            batchId: activePurchase?.id,
+            batchNumber: activePurchase?.batchNumber || 'Lotto Attivo',
+            unitCost: realCost,
+            units: slot.currentStock,
+          }];
 
           return {
             ...slot,
@@ -527,6 +660,9 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       purchases: JSON.parse(JSON.stringify(purchases)),
       restockHistory: JSON.parse(JSON.stringify(restockHistory)),
       maintenances: JSON.parse(JSON.stringify(maintenances)),
+      fixedCosts: JSON.parse(JSON.stringify(fixedCosts)),
+      trackedSpirals: JSON.parse(JSON.stringify(trackedSpirals)),
+      dosagePresets: JSON.parse(JSON.stringify(dosagePresets)),
     };
     setUndoStack(prev => [snapshot, ...prev.slice(0, 19)]);
     setUndoToast({
@@ -534,7 +670,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       actionName,
       timestamp: Date.now(),
     });
-  }, [machines, products, purchases, restockHistory, maintenances]);
+  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
 
   const undoLastAction = useCallback(() => {
     if (undoStack.length === 0) return;
@@ -544,6 +680,9 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setPurchases(lastSnapshot.purchases);
     setRestockHistory(lastSnapshot.restockHistory);
     if (lastSnapshot.maintenances) setMaintenances(lastSnapshot.maintenances);
+    if (lastSnapshot.fixedCosts) setFixedCosts(lastSnapshot.fixedCosts);
+    if (lastSnapshot.trackedSpirals) setTrackedSpirals(lastSnapshot.trackedSpirals);
+    if (lastSnapshot.dosagePresets) setDosagePresets(lastSnapshot.dosagePresets);
     setUndoStack(remaining);
     setUndoToast({
       visible: true,
@@ -589,18 +728,26 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.CHECKPOINTS);
       const prevCheckpoints: SaveCheckpoint[] = raw ? JSON.parse(raw) : [];
-      const updatedCheckpoints = [newCheckpoint, ...prevCheckpoints.filter(c => c.id !== newCheckpoint.id)].slice(0, 20);
-      localStorage.setItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(updatedCheckpoints));
-      localStorage.setItem(STORAGE_KEYS.LAST_PRE_CONFIRM_BACKUP, JSON.stringify(newCheckpoint));
-      setCheckpoints(updatedCheckpoints);
+      const updatedCheckpoints = [newCheckpoint, ...prevCheckpoints.filter(c => c.id !== newCheckpoint.id)].slice(0, 3);
+      const cpSaved = safeSetItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(updatedCheckpoints));
+      safeSetItem(STORAGE_KEYS.LAST_PRE_CONFIRM_BACKUP, JSON.stringify(newCheckpoint));
+      if (cpSaved) {
+        try {
+          const afterRaw = localStorage.getItem(STORAGE_KEYS.CHECKPOINTS);
+          const afterParsed = afterRaw ? JSON.parse(afterRaw) : updatedCheckpoints;
+          setCheckpoints(Array.isArray(afterParsed) ? afterParsed : updatedCheckpoints);
+        } catch {
+          setCheckpoints(updatedCheckpoints);
+        }
+        setLastSavedAt(timestamp);
+      }
       setLastPreConfirmBackup(newCheckpoint);
-      setLastSavedAt(timestamp);
     } catch (e) {
       console.error('Errore salvataggio copia precedente:', e);
     }
 
     return newCheckpoint;
-  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
+  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets, safeSetItem]);
 
   // Helper FIFO: Cerca il lotto fornitore attivo secondo data più vecchia con giacenza residua > 0
   const getActiveFifoBatch = (productId: string, batchList: PurchaseBatch[]): PurchaseBatch | undefined => {
@@ -625,70 +772,78 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       .reduce((sum, b) => sum + Math.max(0, b.remainingUnits), 0);
   };
 
+  // Helper: Crea un lotto di rettifica inventario per giacenza inserita senza lotto
+  const createAdjustmentBatch = (
+    productId: string,
+    productName: string,
+    unitCost: number,
+    units: number
+  ): PurchaseBatch => {
+    const safeUnits = Math.max(0, units);
+    const safeCost = Math.max(0, Number(unitCost) || 0);
+    const nowIso = new Date().toISOString();
+    const dateCode = nowIso.slice(2, 10).replace(/-/g, '');
+    const randSuffix = Math.floor(100 + Math.random() * 900);
+    const totalGross = Number((safeCost * safeUnits).toFixed(2));
+
+    return {
+      id: `batch-rettifica-${Date.now()}-${randSuffix}`,
+      date: nowIso,
+      batchNumber: `RETTIFICA-${dateCode}-${randSuffix}`,
+      productId,
+      productName,
+      supplier: 'Rettifica inventario',
+      packageCount: 1,
+      unitsPerPackage: safeUnits,
+      totalUnits: safeUnits,
+      remainingUnits: safeUnits,
+      priceInputType: 'per_pezzo',
+      isPriceWithoutVat: false,
+      inputPrice: safeCost,
+      vatRate: 0,
+      totalTaxable: totalGross,
+      totalVat: 0,
+      totalGross,
+      unitCostNet: safeCost,
+      unitCostWithVat: safeCost,
+      costBasisUsed: 'ivato',
+      invoiceRef: 'Rettifica inventario',
+      notes: 'Lotto di rettifica inventario creato automaticamente',
+    };
+  };
+
   // Sync to localStorage
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(machines));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [machines]);
+    safeSetItem(STORAGE_KEYS.MACHINES, JSON.stringify(machines));
+  }, [machines, safeSetItem]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [products]);
+    safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
+  }, [products, safeSetItem]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(restockHistory));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [restockHistory]);
+    safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify(restockHistory));
+  }, [restockHistory, safeSetItem]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [purchases]);
+    safeSetItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
+  }, [purchases, safeSetItem]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(maintenances));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [maintenances]);
+    safeSetItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(maintenances));
+  }, [maintenances, safeSetItem]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(fixedCosts));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [fixedCosts]);
+    safeSetItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(fixedCosts));
+  }, [fixedCosts, safeSetItem]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(trackedSpirals));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [trackedSpirals]);
+    safeSetItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(trackedSpirals));
+  }, [trackedSpirals, safeSetItem]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(dosagePresets));
-    } catch (e) {
-      console.error(e);
-    }
-  }, [dosagePresets]);
+    safeSetItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(dosagePresets));
+  }, [dosagePresets, safeSetItem]);
 
   // Tracciamento automatico e persistente di ogni singola spirale (attiva o chiusa)
   useEffect(() => {
@@ -842,7 +997,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const newCost: FixedCost = {
       ...cost,
       id: `fc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      dateAdded: new Date().toISOString().split('T')[0],
+      dateAdded: oggiLocale(),
       autoDeduction: cost.autoDeduction ?? true,
     };
     setFixedCosts(prev => [newCost, ...prev]);
@@ -920,15 +1075,14 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     const totalVat = totalGross - totalTaxable;
-    // Costo unitario netto e ivato: arrotondato ai 2 decimali (centesimi es. 0.537 -> 0.54)
-    const unitCostNet = Math.round((totalTaxable / totalUnits) * 100) / 100;
-    const unitCostWithVat = Math.round((totalGross / totalUnits) * 100) / 100;
+    // Costo unitario netto e ivato: precisione a 4 decimali
+    const unitCostNet = roundUnitCost(totalTaxable / totalUnits);
+    const unitCostWithVat = roundUnitCost(totalGross / totalUnits);
     
     // Negli altri menu mostriamo tutti i prezzi già IVA compresa: usiamo di default 'ivato'
     const costBasis = input.costBasisUsed || 'ivato';
-    const appliedUnitCost = costBasis === 'ivato' ? unitCostWithVat : unitCostNet;
 
-    const batchCode = input.batchNumber?.trim() || `LOT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 900 + 100)}`;
+    const batchCode = input.batchNumber?.trim() || `LOT-${oggiLocale().slice(2).replace(/-/g, '')}-${Math.floor(Math.random() * 900 + 100)}`;
     const purchaseDate = input.date ? new Date(input.date).toISOString() : new Date().toISOString();
 
     const newBatch: PurchaseBatch = {
@@ -962,14 +1116,12 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     // Determina il lotto prioritario FIFO per il calcolo del costo (data più vecchia con giacenza > 0)
     const activeFifo = getActiveFifoBatch(input.productId, nextPurchases);
-    const activeCost = activeFifo 
-      ? (activeFifo.unitCostWithVat > 0 ? activeFifo.unitCostWithVat : (activeFifo.costBasisUsed === 'ivato' ? activeFifo.unitCostWithVat : activeFifo.unitCostNet))
-      : unitCostWithVat;
+    const activeCost = activeFifo ? costoUnitarioLotto(activeFifo) : costoUnitarioLotto(newBatch);
 
     setProducts(prev => {
       const exists = prev.some(p => p.id === input.productId);
       const totalStock = calculateProductWarehouseStock(input.productId, nextPurchases);
-      const activeCostVal = Number(activeCost.toFixed(2));
+      const activeCostVal = roundUnitCost(activeCost);
       if (exists) {
         return prev.map(p => {
           if (p.id !== input.productId) return p;
@@ -1010,12 +1162,10 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       prev.map(p => {
         if (p.id !== toDelete.productId) return p;
         const totalStock = calculateProductWarehouseStock(p.id, nextPurchases);
-        const activeCost = activeFifo 
-          ? (activeFifo.unitCostWithVat > 0 ? activeFifo.unitCostWithVat : (activeFifo.costBasisUsed === 'ivato' ? activeFifo.unitCostWithVat : activeFifo.unitCostNet))
-          : p.unitCost;
+        const activeCost = activeFifo ? costoUnitarioLotto(activeFifo) : p.unitCost;
         return {
           ...p,
-          unitCost: Number(activeCost.toFixed(2)),
+          unitCost: roundUnitCost(activeCost),
           activeBatchId: activeFifo?.id,
           warehouseStock: totalStock,
         };
@@ -1024,13 +1174,15 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   // Aggiorna singolarmente la giacenza di uno specifico lotto fornitore
-  const updateBatchUnits = (batchId: string, newRemainingUnits: number) => {
+  const updateBatchUnits = (batchId: string, newRemainingUnits: number, options?: { skipUndoSnapshot?: boolean }) => {
     const target = purchases.find(p => p.id === batchId);
     if (!target) return;
 
     const safeUnits = Math.max(0, newRemainingUnits);
     savePreviousStateBackup(`Rettifica lotto "${target.batchNumber}" (a ${safeUnits} pz)`);
-    pushUndoSnapshot(`Rettifica lotto "${target.batchNumber}" a ${safeUnits} pz`);
+    if (!options?.skipUndoSnapshot) {
+      pushUndoSnapshot(`Rettifica lotto "${target.batchNumber}" a ${safeUnits} pz`);
+    }
 
     const nextPurchases = purchases.map(p => (p.id === batchId ? { ...p, remainingUnits: safeUnits } : p));
     setPurchases(nextPurchases);
@@ -1040,34 +1192,49 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       prev.map(p => {
         if (p.id !== target.productId) return p;
         const totalStock = calculateProductWarehouseStock(p.id, nextPurchases);
-        const activeCost = activeFifo 
-          ? (activeFifo.unitCostWithVat > 0 ? activeFifo.unitCostWithVat : (activeFifo.costBasisUsed === 'ivato' ? activeFifo.unitCostWithVat : activeFifo.unitCostNet))
-          : p.unitCost;
+        const activeCost = activeFifo ? costoUnitarioLotto(activeFifo) : p.unitCost;
         return {
           ...p,
           warehouseStock: totalStock,
           activeBatchId: activeFifo?.id,
-          unitCost: Number(activeCost.toFixed(2)),
+          unitCost: roundUnitCost(activeCost),
         };
       })
     );
   };
 
-  // Aggiorna data di scadenza e note di uno specifico lotto
+  // Aggiorna data di scadenza e note di uno specifico lotto (sincronizza anche eventuali spirali già caricate)
   const updateBatchExpiry = (batchId: string, expiryDate: string, newNotes?: string) => {
     const target = purchases.find(p => p.id === batchId);
     if (!target) return;
 
+    const cleanExpiry = expiryDate.trim() || undefined;
     pushUndoSnapshot(`Modifica scadenza lotto "${target.batchNumber}"`);
     const nextPurchases = purchases.map(p => {
       if (p.id !== batchId) return p;
       return {
         ...p,
-        expiryDate: expiryDate.trim() || undefined,
+        expiryDate: cleanExpiry,
         notes: newNotes !== undefined ? newNotes.trim() : p.notes,
       };
     });
     setPurchases(nextPurchases);
+
+    setMachines(prev =>
+      prev.map(m => ({
+        ...m,
+        slots: m.slots.map(s =>
+          s.loadedBatches && s.loadedBatches.some(sb => sb.batchId === batchId)
+            ? {
+                ...s,
+                loadedBatches: s.loadedBatches.map(sb =>
+                  sb.batchId === batchId ? { ...sb, expiryDate: cleanExpiry } : sb
+                ),
+              }
+            : s
+        ),
+      }))
+    );
   };
 
   // Segna come finito/esaurito o ripristina le scorte del lotto
@@ -1084,7 +1251,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         : `Riapri lotto "${target.batchNumber}" (${target.totalUnits} pz)`
     );
 
-    updateBatchUnits(batchId, newUnits);
+    updateBatchUnits(batchId, newUnits, { skipUndoSnapshot: true });
   };
 
   // Importazione massiva e carico magazzino da fattura PDF analizzata con AI
@@ -1100,11 +1267,19 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     validItems.forEach((item, idx) => {
       totalPiecesImported += item.quantity;
-      const batchCode = item.batchNumber?.trim() || `LOT-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 900 + 100)}`;
+      const batchCode = item.batchNumber?.trim() || `LOT-${oggiLocale().slice(2).replace(/-/g, '')}-${Math.floor(Math.random() * 900 + 100)}`;
       const purchaseDate = invoice.invoiceDate ? new Date(invoice.invoiceDate).toISOString() : new Date().toISOString();
 
       let targetProductId = item.matchedProductId;
       let prod = nextProducts.find(p => p.id === targetProductId);
+
+      const rawUnitCostNet = Number(item.unitCost) || 0;
+      const totalTaxable = Number((item.totalCostNet || (rawUnitCostNet * item.quantity)).toFixed(2));
+      const vatRate = item.vatRate || invoice.taxRate || 22;
+      const totalVat = Number((totalTaxable * (vatRate / 100)).toFixed(2));
+      const totalGross = Number((totalTaxable + totalVat).toFixed(2));
+      const unitCostNet = roundUnitCost(totalTaxable / item.quantity);
+      const unitCostWithVat = roundUnitCost(totalGross / item.quantity);
 
       // Se non abbinato o se è un nuovo articolo, crealo a catalogo
       if (!prod || item.isNewProduct) {
@@ -1115,13 +1290,12 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           .slice(0, 20);
         targetProductId = `prod-${cleanNameSlug}-${Date.now()}-${idx}`;
 
-        const roundedUnitCost = Math.round((Number(item.unitCost) + Number.EPSILON) * 100) / 100;
         const newProduct: Product = {
           id: targetProductId,
           name: item.productName.trim(),
           category: item.category || 'bevande_fredde',
-          unitCost: roundedUnitCost,
-          defaultPrice: item.defaultPrice > 0 ? Number(item.defaultPrice.toFixed(2)) : Number((roundedUnitCost * 2.2).toFixed(2)),
+          unitCost: unitCostWithVat,
+          defaultPrice: item.defaultPrice > 0 ? Number(item.defaultPrice.toFixed(2)) : Number((unitCostWithVat * 2.2).toFixed(2)),
           unit: item.unit?.trim() || 'pz',
           warehouseStock: item.quantity,
           warehouseAlertThreshold: 8,
@@ -1129,25 +1303,17 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         };
         nextProducts.push(newProduct);
       } else {
-        // Articolo esistente: incrementa giacenza magazzino e aggiorna costo unitario d'acquisto
-        const roundedUnitCost = Math.round((Number(item.unitCost) + Number.EPSILON) * 100) / 100;
+        // Articolo esistente: incrementa giacenza magazzino
         nextProducts = nextProducts.map(p => {
           if (p.id !== targetProductId) return p;
           return {
             ...p,
             warehouseStock: (p.warehouseStock || 0) + item.quantity,
-            unitCost: roundedUnitCost,
+            unitCost: unitCostWithVat,
             defaultPrice: item.defaultPrice > 0 ? item.defaultPrice : p.defaultPrice,
           };
         });
       }
-
-      const roundedUnitCost = Math.round((Number(item.unitCost) + Number.EPSILON) * 100) / 100;
-      const totalTaxable = Number((item.totalCostNet || (roundedUnitCost * item.quantity)).toFixed(2));
-      const vatRate = item.vatRate || invoice.taxRate || 22;
-      const totalVat = Number((totalTaxable * (vatRate / 100)).toFixed(2));
-      const totalGross = Number((totalTaxable + totalVat).toFixed(2));
-      const unitCostWithVat = Number((totalGross / item.quantity).toFixed(2));
 
       const newBatch: PurchaseBatch = {
         id: `purch-ai-${Date.now()}-${idx}`,
@@ -1161,14 +1327,15 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         totalUnits: item.quantity,
         remainingUnits: item.quantity,
         priceInputType: 'totale',
+        isPriceWithoutVat: true,
         inputPrice: totalTaxable,
         vatRate,
         totalTaxable,
         totalVat,
         totalGross,
-        unitCostNet: roundedUnitCost,
+        unitCostNet,
         unitCostWithVat,
-        costBasisUsed: 'netto',
+        costBasisUsed: 'ivato',
         invoiceRef: invoice.invoiceNumber?.trim() || 'Fattura AI',
         notes: `Fattura ${invoice.invoiceNumber || ''}${item.expiryDate ? ' | Scadenza: ' + item.expiryDate : ''}${invoice.notes ? ' | ' + invoice.notes : ''}`.trim(),
         expiryDate: item.expiryDate || undefined,
@@ -1178,6 +1345,15 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
 
     const nextPurchases = [...newBatches, ...purchases];
+    nextProducts = nextProducts.map(p => {
+      const activeFifo = getActiveFifoBatch(p.id, nextPurchases);
+      if (!activeFifo) return p;
+      return {
+        ...p,
+        activeBatchId: activeFifo.id,
+        unitCost: roundUnitCost(costoUnitarioLotto(activeFifo)),
+      };
+    });
     setPurchases(nextPurchases);
     setProducts(nextProducts);
 
@@ -1186,9 +1362,9 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
 
   // Registrazione operazione di carico e calcolo del venduto con FIFO rigoroso
-  const recordRestock = (sessionData: Omit<RestockSession, 'id' | 'timestamp'>) => {
+  const recordRestock = (sessionData: Omit<RestockSession, 'id' | 'timestamp'>): SaveCheckpoint => {
     // 0. SALVA SEMPRE LA COPIA DEL FILE PRECEDENTE PRIMA DI APPLICARE LA CONFERMA
-    savePreviousStateBackup(`Rifornimento ${sessionData.machineName}`);
+    const preConfirmCheckpoint = savePreviousStateBackup(`Rifornimento ${sessionData.machineName}`);
     pushUndoSnapshot(`Carico distributore ${sessionData.machineName} (${sessionData.totalSold} venduti)`);
 
     const timestamp = new Date().toISOString();
@@ -1223,16 +1399,20 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           );
         }
 
-        // Appendi i nuovi lotti in fondo alla coda dello slot
+        // Appendi i nuovi lotti in fondo alla coda dello slot (copiando expiryDate)
         finalSlotBatches = appendLoadedBatches(
           finalSlotBatches,
           loadPlan.allocations,
           fallbackCost,
-          loadPlan.unallocatedUnits
+          loadPlan.unallocatedUnits,
+          updatedPurchases
         );
       }
 
       // Se ci sono unità tolte dal distributore (scadute o rese a magazzino):
+      let removedLoss = 0;
+      const removedBatchDetails: RestockItemBatchConsumption[] = [];
+
       if (item.unitsRemoved && item.unitsRemoved > 0) {
         let remainingToRemove = item.unitsRemoved;
         const cleanedBatches: SlotLoadedBatch[] = [];
@@ -1240,36 +1420,91 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           if (remainingToRemove <= 0) {
             cleanedBatches.push(b);
           } else if (b.units <= remainingToRemove) {
-            remainingToRemove -= b.units;
+            const taken = b.units;
+            removedBatchDetails.push({
+              batchId: b.batchId,
+              batchNumber: b.batchNumber,
+              invoiceRef: b.invoiceRef,
+              units: taken,
+              unitCost: b.unitCost,
+              totalCost: Number((taken * b.unitCost).toFixed(4)),
+            });
+            remainingToRemove -= taken;
           } else {
-            cleanedBatches.push({ ...b, units: b.units - remainingToRemove });
+            const taken = remainingToRemove;
+            removedBatchDetails.push({
+              batchId: b.batchId,
+              batchNumber: b.batchNumber,
+              invoiceRef: b.invoiceRef,
+              units: taken,
+              unitCost: b.unitCost,
+              totalCost: Number((taken * b.unitCost).toFixed(4)),
+            });
+            cleanedBatches.push({ ...b, units: Number((b.units - taken).toFixed(4)) });
             remainingToRemove = 0;
           }
         }
         finalSlotBatches = cleanedBatches;
 
-        // Se contrassegnato come "Reso a magazzino", riaccredita le unità a magazzino nel lotto del prodotto
+        if (remainingToRemove > 0) {
+          removedBatchDetails.push({
+            batchId: item.batchId || activeCostInfo.batchId,
+            batchNumber: item.batchNumber || activeCostInfo.batchNumber,
+            units: remainingToRemove,
+            unitCost: fallbackCost,
+            totalCost: Number((remainingToRemove * fallbackCost).toFixed(4)),
+          });
+        }
+
+        // Se contrassegnato come "Reso a magazzino", riaccredita ogni tranche esattamente al suo lotto di provenienza (tramite batchId)
         if (item.returnToWarehouse) {
-          const targetBatchIndex = updatedPurchases.findIndex(p => p.productId === item.productId && p.remainingUnits > 0);
-          const fallbackBatchIndex = updatedPurchases.findIndex(p => p.productId === item.productId);
-          const idxToCredit = targetBatchIndex !== -1 ? targetBatchIndex : fallbackBatchIndex;
-          if (idxToCredit !== -1) {
-            updatedPurchases = updatedPurchases.map((p, pIdx) => 
-              pIdx === idxToCredit ? { ...p, remainingUnits: p.remainingUnits + item.unitsRemoved! } : p
-            );
+          for (const rem of removedBatchDetails) {
+            let credited = false;
+            if (rem.batchId) {
+              const exactIdx = updatedPurchases.findIndex(p => p.id === rem.batchId);
+              if (exactIdx !== -1) {
+                updatedPurchases = updatedPurchases.map((p, pIdx) =>
+                  pIdx === exactIdx ? { ...p, remainingUnits: p.remainingUnits + rem.units } : p
+                );
+                credited = true;
+              }
+            }
+            if (!credited && rem.batchNumber) {
+              const byNumberIdx = updatedPurchases.findIndex(
+                p => p.productId === item.productId && p.batchNumber === rem.batchNumber
+              );
+              if (byNumberIdx !== -1) {
+                updatedPurchases = updatedPurchases.map((p, pIdx) =>
+                  pIdx === byNumberIdx ? { ...p, remainingUnits: p.remainingUnits + rem.units } : p
+                );
+                credited = true;
+              }
+            }
+            if (!credited) {
+              const fallbackIdx = updatedPurchases.findIndex(p => p.productId === item.productId);
+              if (fallbackIdx !== -1) {
+                updatedPurchases = updatedPurchases.map((p, pIdx) =>
+                  pIdx === fallbackIdx ? { ...p, remainingUnits: p.remainingUnits + rem.units } : p
+                );
+              }
+            }
           }
+        } else {
+          // Merce scaduta / scartata: registra il costo come perdita nella sessione
+          removedLoss = Number(removedBatchDetails.reduce((s, r) => s + r.totalCost, 0).toFixed(2));
         }
       }
 
       const cost = fifoConsumption.costOfSold;
       const unitCost = fifoConsumption.avgUnitCost;
-      const profit = Number((item.revenue - cost).toFixed(2));
+      const profit = Number((item.revenue - cost - removedLoss).toFixed(2));
 
       return {
         ...item,
         unitCost,
         cost,
         profit,
+        removedLoss: removedLoss > 0 ? removedLoss : undefined,
         batchConsumptions: fifoConsumption.consumptions,
         loadedAllocations: loadPlanAllocations,
         batchNumber: finalSlotBatches[0]?.batchNumber || item.batchNumber,
@@ -1278,10 +1513,17 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       };
     });
 
-    const totalRevenue = Number(processedItems.reduce((s, i) => s + i.revenue, 0).toFixed(2));
+    const isCoffeeSession = sessionData.coffeeDispenses !== undefined || targetMachine?.type === 'caffe_calde';
+    const itemsRevenue = Number(processedItems.reduce((s, i) => s + i.revenue, 0).toFixed(2));
+    const totalRevenue = isCoffeeSession && typeof sessionData.totalRevenue === 'number'
+      ? Number(sessionData.totalRevenue.toFixed(2))
+      : itemsRevenue;
     const totalCost = Number(processedItems.reduce((s, i) => s + i.cost, 0).toFixed(2));
-    const totalProfit = Number((totalRevenue - totalCost).toFixed(2));
-    const totalSold = processedItems.reduce((s, i) => s + i.unitsSold, 0);
+    const totalRemovedLoss = Number(processedItems.reduce((s, i) => s + (i.removedLoss || 0), 0).toFixed(2));
+    const totalProfit = Number((totalRevenue - totalCost - totalRemovedLoss).toFixed(2));
+    const totalSold = isCoffeeSession
+      ? (sessionData.coffeeDispenses ?? sessionData.totalSold ?? 0)
+      : processedItems.reduce((s, i) => s + i.unitsSold, 0);
 
     const newSession: RestockSession = {
       ...sessionData,
@@ -1292,6 +1534,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       totalCost,
       totalProfit,
       totalSold,
+      totalRemovedLoss: totalRemovedLoss > 0 ? totalRemovedLoss : undefined,
     };
 
     // 1. Aggiorna scorte e coda lotti della macchina interessata
@@ -1340,9 +1583,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const matchingBatches = updatedPurchases.filter(b => b.productId === p.id);
       const totalStock = matchingBatches.reduce((sum, b) => sum + Math.max(0, b.remainingUnits), 0);
       const activeFifo = getActiveFifoBatch(p.id, updatedPurchases);
-      const activeCost = activeFifo 
-        ? (activeFifo.costBasisUsed === 'ivato' ? activeFifo.unitCostWithVat : activeFifo.unitCostNet)
-        : p.unitCost;
+      const activeCost = activeFifo ? costoUnitarioLotto(activeFifo) : p.unitCost;
 
       const sessionItem = sessionData.items.find(i => i.productId === p.id);
       const newPrice = sessionItem && sessionItem.salePrice ? sessionItem.salePrice : p.defaultPrice;
@@ -1351,7 +1592,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ...p,
         warehouseStock: totalStock,
         activeBatchId: activeFifo?.id,
-        unitCost: Number(activeCost.toFixed(3)),
+        unitCost: roundUnitCost(activeCost),
         defaultPrice: newPrice,
       };
     });
@@ -1364,12 +1605,12 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     // 5. SALVATAGGIO AUTOMATICO IMMEDIATO AD OGNI CARICA RAPIDA CONFERMATA:
     try {
-      localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(updatedMachines));
-      localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(updatedProducts));
-      localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(updatedPurchases));
-      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(updatedHistory));
-      localStorage.setItem(STORAGE_KEYS.LAST_SAVE_TIME, timestamp);
-      localStorage.setItem(STORAGE_KEYS.LAST_RESTOCK_AUTOSAVE, JSON.stringify({
+      const mOk = safeSetItem(STORAGE_KEYS.MACHINES, JSON.stringify(updatedMachines));
+      const pOk = safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(updatedProducts));
+      const puOk = safeSetItem(STORAGE_KEYS.PURCHASES, JSON.stringify(updatedPurchases));
+      const hOk = safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify(updatedHistory));
+      safeSetItem(STORAGE_KEYS.LAST_SAVE_TIME, timestamp);
+      safeSetItem(STORAGE_KEYS.LAST_RESTOCK_AUTOSAVE, JSON.stringify({
         timestamp,
         machineName: sessionData.machineName,
         totalSold: sessionData.totalSold,
@@ -1403,14 +1644,26 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       const rawCheckpoints = localStorage.getItem(STORAGE_KEYS.CHECKPOINTS);
       const parsedCheckpoints: SaveCheckpoint[] = rawCheckpoints ? JSON.parse(rawCheckpoints) : [];
-      const nextCheckpoints = [autoCheckpoint, ...parsedCheckpoints.filter(c => c.id !== autoCheckpoint.id)].slice(0, 15);
-      localStorage.setItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(nextCheckpoints));
-      setCheckpoints(nextCheckpoints);
-      setLastSavedAt(timestamp);
-      setLastAutoRestockSavedAt(timestamp);
+      const nextCheckpoints = [autoCheckpoint, ...parsedCheckpoints.filter(c => c.id !== autoCheckpoint.id)].slice(0, 3);
+      const cpOk = safeSetItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(nextCheckpoints));
+      if (cpOk) {
+        try {
+          const afterRaw = localStorage.getItem(STORAGE_KEYS.CHECKPOINTS);
+          const afterParsed = afterRaw ? JSON.parse(afterRaw) : nextCheckpoints;
+          setCheckpoints(Array.isArray(afterParsed) ? afterParsed : nextCheckpoints);
+        } catch {
+          setCheckpoints(nextCheckpoints);
+        }
+      }
+      if (mOk && pOk && puOk && hOk) {
+        setLastSavedAt(timestamp);
+        setLastAutoRestockSavedAt(timestamp);
+      }
     } catch (e) {
       console.error('Errore auto-salvataggio carica rapida', e);
     }
+
+    return preConfirmCheckpoint;
   };
 
   // Simula vendite casuali realistiche sulle macchine per testare in tempo reale il decremento scorte
@@ -1489,14 +1742,22 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const updateProduct = (updated: Product) => {
     savePreviousStateBackup(`Modifica dati prodotto: ${updated.name}`);
     pushUndoSnapshot(`Modifica prodotto "${updated.name}"`);
+    const prevProd = products.find(p => p.id === updated.id);
+    const defaultPriceChanged = prevProd !== undefined && prevProd.defaultPrice !== updated.defaultPrice;
     setProducts(prev => prev.map(p => (p.id === updated.id ? updated : p)));
-    // Aggiorna anche i prezzi e costi di default sugli slot se appropriato
-    setMachines(prev =>
-      prev.map(m => ({
-        ...m,
-        slots: m.slots.map(s => (s.productId === updated.id ? { ...s, salePrice: updated.defaultPrice } : s)),
-      }))
-    );
+    // Aggiorna il prezzo sugli slot solo se defaultPrice è cambiato e lo slot aveva ancora il vecchio prezzo di listino
+    if (defaultPriceChanged) {
+      setMachines(prev =>
+        prev.map(m => ({
+          ...m,
+          slots: m.slots.map(s =>
+            s.productId === updated.id && s.salePrice === prevProd.defaultPrice
+              ? { ...s, salePrice: updated.defaultPrice }
+              : s
+          ),
+        }))
+      );
+    }
   };
 
   const addProduct = (
@@ -1521,7 +1782,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const productId = `prod-${Date.now()}`;
     let productStock = newProd.warehouseStock || 0;
     let createdBatchId: string | undefined = undefined;
-    let finalUnitCost = newProd.unitCost;
+    let finalUnitCost = roundUnitCost(newProd.unitCost);
 
     if (initialBatch && ((initialBatch.packageCount && initialBatch.packageCount > 0) || (initialBatch.inputPrice && initialBatch.inputPrice > 0))) {
       const packageCount = initialBatch.packageCount || 1;
@@ -1565,16 +1826,15 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
 
       const totalVat = Math.max(0, totalGross - totalTaxable);
-      // Arrotondamento standard per eccesso/difetto ai centesimi (es. 0.537 -> 0.54)
-      const unitCostNet = Math.round((totalTaxable / totalUnits) * 100) / 100;
-      const unitCostWithVat = Math.round((totalGross / totalUnits) * 100) / 100;
-      finalUnitCost = unitCostWithVat; // Negli altri menu mostriamo tutti i prezzi già IVA compresa
+      // Precisione a 4 decimali per i costi unitari
+      const unitCostNet = roundUnitCost(totalTaxable / totalUnits);
+      const unitCostWithVat = roundUnitCost(totalGross / totalUnits);
 
       const batchId = `batch-${Date.now()}`;
       createdBatchId = batchId;
       const newBatch: PurchaseBatch = {
         id: batchId,
-        date: initialBatch.date || new Date().toISOString().slice(0, 10),
+        date: initialBatch.date || oggiLocale(),
         batchNumber: initialBatch.batchNumber || `LOT-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`,
         productId: productId,
         productName: newProd.name,
@@ -1598,7 +1858,13 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         expiryDate: initialBatch.expiryDate,
       };
 
+      finalUnitCost = roundUnitCost(costoUnitarioLotto(newBatch));
       setPurchases(prev => [newBatch, ...prev]);
+    } else if (productStock > 0) {
+      const adjustmentBatch = createAdjustmentBatch(productId, newProd.name, finalUnitCost, productStock);
+      createdBatchId = adjustmentBatch.id;
+      finalUnitCost = roundUnitCost(costoUnitarioLotto(adjustmentBatch));
+      setPurchases(prev => [adjustmentBatch, ...prev]);
     }
 
     const product: Product = {
@@ -1612,18 +1878,56 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setProducts(prev => [...prev, product]);
   };
 
-  const deleteProduct = (productId: string) => {
+  const deleteProduct = (productId: string): {
+    success: boolean;
+    message?: string;
+    usedIn?: Array<{ machineCode: string; machineName: string; slotLabel: string }>;
+    checkpointId?: string;
+  } => {
     const prod = products.find(p => p.id === productId);
-    savePreviousStateBackup(`Eliminazione prodotto: ${prod?.name || 'Articolo'}`);
-    pushUndoSnapshot(`Eliminazione prodotto "${prod?.name || 'Articolo'}"`);
-    setProducts(prev => prev.filter(p => p.id !== productId));
-    setPurchases(prev => prev.filter(p => p.productId !== productId));
-    setMachines(prev =>
-      prev.map(m => ({
-        ...m,
-        slots: m.slots.map(s => s.productId === productId ? { ...s, currentStock: 0, lastRestockStock: 0 } : s),
-      }))
+    const usedIn: Array<{ machineCode: string; machineName: string; slotLabel: string }> = [];
+
+    for (const m of machines) {
+      for (const s of m.slots || []) {
+        if (s.productId === productId) {
+          usedIn.push({
+            machineCode: m.code,
+            machineName: m.name,
+            slotLabel: s.label,
+          });
+        }
+      }
+    }
+
+    if (usedIn.length > 0) {
+      const locationsList = usedIn
+        .map(u => `${u.machineCode} (${u.slotLabel})`)
+        .join(', ');
+      return {
+        success: false,
+        usedIn,
+        message: `Impossibile archiviare/eliminare "${prod?.name || 'questo articolo'}": è ancora associato alle spirali: ${locationsList}. Rimuovi prima l'associazione dalle spirali.`,
+      };
+    }
+
+    const savedCheckpoint = savePreviousStateBackup(`Archiviazione prodotto: ${prod?.name || 'Articolo'}`);
+    pushUndoSnapshot(`Archiviazione prodotto "${prod?.name || 'Articolo'}"`);
+    setProducts(prev =>
+      prev.map(p =>
+        p.id === productId
+          ? { ...p, archived: true, warehouseStock: 0, activeBatchId: undefined }
+          : p
+      )
     );
+    setPurchases(prev =>
+      prev.map(b => (b.productId === productId ? { ...b, remainingUnits: 0 } : b))
+    );
+
+    return {
+      success: true,
+      checkpointId: savedCheckpoint.id,
+      message: `"${prod?.name || 'Articolo'}" contrassegnato come archiviato: lo storico vendite e i lotti restano intatti.`,
+    };
   };
 
   const clearAllProducts = () => {
@@ -1660,13 +1964,16 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const modifiedSlots = m.slots.map(s => {
           if (s.id !== slotId) return s;
           const newCap = updates.capacity !== undefined ? Math.max(1, Math.round(updates.capacity)) : s.capacity;
+          const productChanged = updates.productId !== undefined && updates.productId !== s.productId;
           return {
             ...s,
             ...updates,
             label: updates.label !== undefined ? updates.label.trim() : s.label,
             capacity: newCap,
-            currentStock: Math.min(s.currentStock, newCap),
-            lastRestockStock: Math.min(s.lastRestockStock ?? s.currentStock, newCap),
+            currentStock: productChanged ? 0 : Math.min(s.currentStock, newCap),
+            lastRestockStock: productChanged ? 0 : Math.min(s.lastRestockStock ?? s.currentStock, newCap),
+            loadedBatches: productChanged ? [] : s.loadedBatches,
+            activeBatchNumber: productChanged ? undefined : s.activeBatchNumber,
           };
         });
 
@@ -1682,41 +1989,187 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     );
   };
 
-  // Modifica multipla o singola di spirali, prodotti e capienza
-  const updateMachineSpirals = (machineId: string, updates: SpiralConfigUpdate[], newSlotOrderIds?: string[]) => {
+  // Modifica multipla o singola di spirali, prodotti, capienza, eliminazioni e aggiunte (applicata al Salva)
+  const updateMachineSpirals = (
+    machineId: string,
+    updates: SpiralConfigUpdate[],
+    _newSlotOrderIds?: string[],
+    options?: {
+      deletedSlots?: Array<{ slotId: string; disposition?: 'warehouse' | 'loss' }>;
+      newSlots?: Omit<MachineSlot, 'id'>[];
+    }
+  ) => {
     const targetMachine = machines.find(m => m.id === machineId);
-    if (!targetMachine || updates.length === 0) return;
+    const deletedList = options?.deletedSlots || [];
+    const newSlotsList = options?.newSlots || [];
+    if (!targetMachine || (updates.length === 0 && deletedList.length === 0 && newSlotsList.length === 0)) return;
 
+    savePreviousStateBackup(`Configurazione spirali ${targetMachine.name}`);
     pushUndoSnapshot(`Modifica spirali e prodotti per ${targetMachine.name}`);
 
-    // 1. Aggiorna nome spirale, capienza, prodotto e prezzo su ogni slot interessato
+    let nextPurchases = [...purchases];
+    const touchedProductIds = new Set<string>();
+    const lossItems: RestockItemRecord[] = [];
+    const lossNotes: string[] = [];
+
+    const handleSlotStockDisposition = (
+      slot: MachineSlot,
+      disposition: 'warehouse' | 'loss' | undefined,
+      reasonLabel: string
+    ) => {
+      if (!slot || slot.currentStock <= 0 || !disposition) return;
+      const prod = products.find(p => p.id === slot.productId);
+      const activeCostInfo = getSlotActiveCost(slot, prod, nextPurchases);
+      const fallbackCost = activeCostInfo.unitCost || (prod ? prod.unitCost : 0) || 0;
+      const qtyToHandle = slot.currentStock;
+
+      const fifo = consumeSlotFifo(slot, qtyToHandle, fallbackCost);
+      const tranches =
+        fifo.consumptions.length > 0
+          ? fifo.consumptions
+          : [
+              {
+                batchId: activeCostInfo.batchId,
+                batchNumber: activeCostInfo.batchNumber || slot.activeBatchNumber,
+                units: qtyToHandle,
+                unitCost: fallbackCost,
+                totalCost: Number((qtyToHandle * fallbackCost).toFixed(4)),
+              },
+            ];
+
+      if (disposition === 'warehouse') {
+        touchedProductIds.add(slot.productId);
+        for (const tr of tranches) {
+          if (tr.units <= 0) continue;
+          let credited = false;
+          if (tr.batchId) {
+            const exactIdx = nextPurchases.findIndex(p => p.id === tr.batchId);
+            if (exactIdx !== -1) {
+              nextPurchases = nextPurchases.map((p, idx) =>
+                idx === exactIdx ? { ...p, remainingUnits: p.remainingUnits + tr.units } : p
+              );
+              credited = true;
+            }
+          }
+          if (!credited && tr.batchNumber) {
+            const byNumIdx = nextPurchases.findIndex(
+              p => p.productId === slot.productId && p.batchNumber === tr.batchNumber
+            );
+            if (byNumIdx !== -1) {
+              nextPurchases = nextPurchases.map((p, idx) =>
+                idx === byNumIdx ? { ...p, remainingUnits: p.remainingUnits + tr.units } : p
+              );
+              credited = true;
+            }
+          }
+          if (!credited) {
+            const fallbackIdx = nextPurchases.findIndex(p => p.productId === slot.productId);
+            if (fallbackIdx !== -1) {
+              nextPurchases = nextPurchases.map((p, idx) =>
+                idx === fallbackIdx ? { ...p, remainingUnits: p.remainingUnits + tr.units } : p
+              );
+            } else {
+              const adjBatch = createAdjustmentBatch(
+                slot.productId,
+                prod?.name || slot.label,
+                tr.unitCost || fallbackCost,
+                tr.units
+              );
+              nextPurchases = [adjBatch, ...nextPurchases];
+            }
+          }
+        }
+      } else if (disposition === 'loss') {
+        const lossAmount = Number(tranches.reduce((sum, t) => sum + t.totalCost, 0).toFixed(2));
+        lossItems.push({
+          slotId: slot.id,
+          slotLabel: slot.label,
+          productId: slot.productId,
+          productName: prod?.name || slot.label,
+          batchId: tranches[0]?.batchId,
+          batchNumber: tranches[0]?.batchNumber,
+          previousStock: qtyToHandle,
+          countedRemaining: 0,
+          unitsSold: 0,
+          unitsRemoved: qtyToHandle,
+          returnToWarehouse: false,
+          salePrice: slot.salePrice,
+          unitCost: fifo.avgUnitCost || fallbackCost,
+          revenue: 0,
+          cost: 0,
+          profit: Number((-lossAmount).toFixed(2)),
+          addedStock: 0,
+          newStock: 0,
+          removedLoss: lossAmount > 0 ? lossAmount : undefined,
+        });
+        lossNotes.push(`${slot.label} (${reasonLabel}: ${qtyToHandle} pz)`);
+      }
+    };
+
+    const deletedIdsSet = new Set(deletedList.map(d => d.slotId));
+
+    // Gestisci le rimanenze delle spirali eliminate
+    for (const del of deletedList) {
+      const targetSlot = targetMachine.slots.find(s => s.id === del.slotId);
+      if (targetSlot && targetSlot.currentStock > 0) {
+        handleSlotStockDisposition(targetSlot, del.disposition || 'loss', 'Eliminazione spirale');
+      }
+    }
+
+    // Gestisci le rimanenze delle spirali a cui è stato cambiato prodotto
+    for (const u of updates) {
+      if (deletedIdsSet.has(u.slotId)) continue;
+      const targetSlot = targetMachine.slots.find(s => s.id === u.slotId);
+      if (targetSlot && u.productId && u.productId !== targetSlot.productId && targetSlot.currentStock > 0) {
+        handleSlotStockDisposition(targetSlot, u.stockDisposition || 'loss', 'Cambio prodotto');
+      }
+    }
+
+    // 1. Aggiorna gli slot della macchina (senza mai rinominare prodotti o lotti)
+    const isCoffee = targetMachine.type === 'caffe_calde';
     setMachines(prev =>
       prev.map(m => {
         if (m.id !== machineId) return m;
 
-        let updatedSlots = m.slots.map(slot => {
-          const match = updates.find(u => u.slotId === slot.id);
-          if (!match) return slot;
+        const keptSlots = m.slots
+          .filter(slot => !deletedIdsSet.has(slot.id))
+          .map(slot => {
+            const match = updates.find(u => u.slotId === slot.id);
+            if (!match) return slot;
 
-          const safeCapacity = Math.max(1, Math.round(match.capacity));
-          const safeCurrentStock = Math.min(slot.currentStock, safeCapacity);
-          const safeLastRestock = Math.min(slot.lastRestockStock ?? slot.currentStock, safeCapacity);
+            const safeCapacity = Math.max(1, Math.round(match.capacity));
+            const productChanged = Boolean(match.productId && match.productId !== slot.productId);
+            const safeCurrentStock = productChanged ? 0 : Math.min(slot.currentStock, safeCapacity);
+            const safeLastRestock = productChanged
+              ? 0
+              : Math.min(slot.lastRestockStock ?? slot.currentStock, safeCapacity);
 
-          return {
-            ...slot,
-            label: match.label.trim() || slot.label,
-            productId: match.productId || slot.productId,
-            capacity: safeCapacity,
-            currentStock: safeCurrentStock,
-            lastRestockStock: safeLastRestock,
-            salePrice: match.salePrice !== undefined ? Math.max(0.1, Number(match.salePrice.toFixed(2))) : slot.salePrice,
-            alertThreshold: match.alertThreshold !== undefined ? Math.max(0, match.alertThreshold) : slot.alertThreshold,
-          };
-        });
+            return {
+              ...slot,
+              label: match.label.trim() || slot.label,
+              productId: match.productId || slot.productId,
+              capacity: safeCapacity,
+              currentStock: safeCurrentStock,
+              lastRestockStock: safeLastRestock,
+              loadedBatches: productChanged ? [] : slot.loadedBatches,
+              activeBatchNumber: productChanged ? undefined : slot.activeBatchNumber,
+              salePrice: match.salePrice !== undefined ? Math.max(0.1, Number(match.salePrice.toFixed(2))) : slot.salePrice,
+              alertThreshold: match.alertThreshold !== undefined ? Math.max(0, match.alertThreshold) : slot.alertThreshold,
+            };
+          });
 
-        // Ordina sempre le spirali in ordine numerico progressivo automatico
-        updatedSlots = sortSlotsByNumericOrder(updatedSlots);
+        const appendedNewSlots: MachineSlot[] = newSlotsList.map((ns, idx) => ({
+          ...ns,
+          id: `slot-${Date.now()}-${idx}-${Math.floor(Math.random() * 1000)}`,
+          capacity: Math.max(1, ns.capacity || (isCoffee ? 100 : 20)),
+          currentStock: 0,
+          lastRestockStock: 0,
+          loadedBatches: [],
+          salePrice: Math.max(0.0, ns.salePrice ?? (isCoffee ? 0 : 1.0)),
+          alertThreshold: ns.alertThreshold ?? (isCoffee ? 20 : 5),
+        }));
 
+        const updatedSlots = sortSlotsByNumericOrder([...keptSlots, ...appendedNewSlots]);
         const updatedM: VendingMachine = {
           ...m,
           slots: updatedSlots,
@@ -1726,44 +2179,42 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       })
     );
 
-    // 2. Aggiorna i nomi dei prodotti in catalogo (e defaultPrice)
-    setProducts(prevProducts => {
-      let changed = false;
-      const nextProducts = prevProducts.map(prod => {
-        const matchingUpdates = updates.filter(u => u.productId === prod.id && u.productName && u.productName.trim());
-        if (matchingUpdates.length === 0) return prod;
-
-        const latestUpdate = matchingUpdates[matchingUpdates.length - 1];
-        const newName = latestUpdate.productName.trim();
-        if (newName && (newName !== prod.name || (latestUpdate.salePrice && latestUpdate.salePrice !== prod.defaultPrice))) {
-          changed = true;
+    if (touchedProductIds.size > 0) {
+      setPurchases(nextPurchases);
+      setProducts(prev =>
+        prev.map(p => {
+          if (!touchedProductIds.has(p.id)) return p;
+          const totalStock = calculateProductWarehouseStock(p.id, nextPurchases);
+          const activeFifo = getActiveFifoBatch(p.id, nextPurchases);
+          const activeCost = activeFifo ? costoUnitarioLotto(activeFifo) : p.unitCost;
           return {
-            ...prod,
-            name: newName,
-            defaultPrice: latestUpdate.salePrice !== undefined ? latestUpdate.salePrice : prod.defaultPrice,
+            ...p,
+            warehouseStock: totalStock,
+            activeBatchId: activeFifo?.id || p.activeBatchId,
+            unitCost: roundUnitCost(activeCost),
           };
-        }
-        return prod;
-      });
-      return changed ? nextProducts : prevProducts;
-    });
+        })
+      );
+    }
 
-    // 3. Sincronizza i nomi dei prodotti anche sullo storico lotti fornitore per visualizzazione uniforme
-    setPurchases(prevPurchases => {
-      let changed = false;
-      const nextPurchases = prevPurchases.map(batch => {
-        const matchingUpdate = updates.find(u => u.productId === batch.productId && u.productName && u.productName.trim());
-        if (matchingUpdate && matchingUpdate.productName.trim() !== batch.productName) {
-          changed = true;
-          return {
-            ...batch,
-            productName: matchingUpdate.productName.trim(),
-          };
-        }
-        return batch;
-      });
-      return changed ? nextPurchases : prevPurchases;
-    });
+    if (lossItems.length > 0) {
+      const totalLoss = Number(lossItems.reduce((s, i) => s + (i.removedLoss || 0), 0).toFixed(2));
+      const lossSession: RestockSession = {
+        id: `restock-loss-${Date.now()}`,
+        machineId: targetMachine.id,
+        machineName: targetMachine.name,
+        machineCode: targetMachine.code,
+        timestamp: new Date().toISOString(),
+        items: lossItems,
+        totalSold: 0,
+        totalRevenue: 0,
+        totalCost: 0,
+        totalRemovedLoss: totalLoss > 0 ? totalLoss : undefined,
+        totalProfit: Number((-totalLoss).toFixed(2)),
+        operatorNotes: `Perdita registrata da configurazione spirali: ${lossNotes.join(', ')}`,
+      };
+      setRestockHistory(prev => [lossSession, ...prev]);
+    }
   };
 
   const addSlotToMachine = (machineId: string, newSlot: Omit<MachineSlot, 'id'>) => {
@@ -1931,7 +2382,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     savePreviousStateBackup(`Rettifica magazzino: ${prod?.name || 'prodotto'} (a ${safeStock} pz)`);
     pushUndoSnapshot(`Rettifica scorta magazzino "${prod?.name || 'prodotto'}" a ${safeStock} pz`);
 
-    // Sincronizza anche con i lotti esistenti
+    // Sincronizza anche con i lotti esistenti (la giacenza deve venire sempre e solo dai lotti)
     const productBatches = purchases.filter(p => p.productId === productId);
     let nextPurchases = [...purchases];
 
@@ -1955,18 +2406,28 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       }
       setPurchases(nextPurchases);
+    } else if (safeStock > 0) {
+      const adjustmentBatch = createAdjustmentBatch(
+        productId,
+        prod?.name || 'Prodotto',
+        prod?.unitCost || 0,
+        safeStock
+      );
+      nextPurchases = [adjustmentBatch, ...nextPurchases];
+      setPurchases(nextPurchases);
     }
 
+    const totalStockFromBatches = calculateProductWarehouseStock(productId, nextPurchases);
     const activeFifo = getActiveFifoBatch(productId, nextPurchases);
     setProducts(prev =>
       prev.map(p => {
         if (p.id !== productId) return p;
         return {
           ...p,
-          warehouseStock: safeStock,
+          warehouseStock: totalStockFromBatches,
           activeBatchId: activeFifo?.id || p.activeBatchId,
-          unitCost: activeFifo 
-            ? Number((activeFifo.costBasisUsed === 'ivato' ? activeFifo.unitCostWithVat : activeFifo.unitCostNet).toFixed(3))
+          unitCost: activeFifo
+            ? roundUnitCost(costoUnitarioLotto(activeFifo))
             : p.unitCost,
         };
       })
@@ -2001,16 +2462,12 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setPurchases([]);
     setMaintenances([]);
     setTrackedSpirals([]);
-    try {
-      localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(cleanMachines));
-      localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify([]));
-      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify([]));
-      localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify([]));
-      localStorage.setItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify([]));
-      localStorage.setItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify([]));
-    } catch (e) {
-      console.error('Error resetting data to zero', e);
-    }
+    safeSetItem(STORAGE_KEYS.MACHINES, JSON.stringify(cleanMachines));
+    safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify([]));
+    safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify([]));
+    safeSetItem(STORAGE_KEYS.PURCHASES, JSON.stringify([]));
+    safeSetItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify([]));
+    safeSetItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify([]));
   };
 
   const restoreSavedBackup = () => {
@@ -2020,15 +2477,11 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setRestockHistory(BACKUP_PREVIOUS_SOLUTION.restockHistory || []);
     setPurchases(BACKUP_PREVIOUS_SOLUTION.purchases || []);
     setMaintenances(BACKUP_PREVIOUS_SOLUTION.maintenances || []);
-    try {
-      localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.machines));
-      localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.products));
-      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.restockHistory || []));
-      localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.purchases || []));
-      localStorage.setItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.maintenances || []));
-    } catch (e) {
-      console.error('Error restoring saved backup', e);
-    }
+    safeSetItem(STORAGE_KEYS.MACHINES, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.machines));
+    safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.products));
+    safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.restockHistory || []));
+    safeSetItem(STORAGE_KEYS.PURCHASES, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.purchases || []));
+    safeSetItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(BACKUP_PREVIOUS_SOLUTION.maintenances || []));
   };
 
   const resetToSampleData = () => {
@@ -2051,19 +2504,15 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dosagePresets,
       };
 
-      try {
-        localStorage.setItem(STORAGE_KEYS.LAST_BACKUP, JSON.stringify({
-          timestamp: new Date().toISOString(),
-          backupData
-        }));
-      } catch (storageErr) {
-        console.warn('Impossibile salvare copia locale nel browser', storageErr);
-      }
+      safeSetItem(STORAGE_KEYS.LAST_BACKUP, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        backupData
+      }));
 
       const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(backupData, null, 2));
       const a = document.createElement('a');
       a.setAttribute('href', dataStr);
-      a.setAttribute('download', `backup_ms_take_a_managment_${new Date().toISOString().slice(0, 10)}.json`);
+      a.setAttribute('download', `backup_ms_take_a_managment_${oggiLocale()}.json`);
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -2108,23 +2557,19 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (Array.isArray(data.trackedSpirals)) setTrackedSpirals(restoredTrackedSpirals);
       if (Array.isArray(data.dosagePresets)) setDosagePresets(restoredDosagePresets);
 
-      try {
-        localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(restoredMachines));
-        localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(restoredProducts));
-        localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(restoredPurchases));
-        localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(restoredHistory));
-        localStorage.setItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(restoredMaintenances));
-        if (Array.isArray(data.fixedCosts)) localStorage.setItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(restoredFixedCosts));
-        if (Array.isArray(data.trackedSpirals)) localStorage.setItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(restoredTrackedSpirals));
-        if (Array.isArray(data.dosagePresets)) localStorage.setItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(restoredDosagePresets));
-        
-        localStorage.setItem(STORAGE_KEYS.LAST_BACKUP, JSON.stringify({
-          timestamp: new Date().toISOString(),
-          backupData: data
-        }));
-      } catch (e) {
-        console.error('Errore salvataggio storage dopo ripristino backup', e);
-      }
+      safeSetItem(STORAGE_KEYS.MACHINES, JSON.stringify(restoredMachines));
+      safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(restoredProducts));
+      safeSetItem(STORAGE_KEYS.PURCHASES, JSON.stringify(restoredPurchases));
+      safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify(restoredHistory));
+      safeSetItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(restoredMaintenances));
+      if (Array.isArray(data.fixedCosts)) safeSetItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(restoredFixedCosts));
+      if (Array.isArray(data.trackedSpirals)) safeSetItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(restoredTrackedSpirals));
+      if (Array.isArray(data.dosagePresets)) safeSetItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(restoredDosagePresets));
+
+      safeSetItem(STORAGE_KEYS.LAST_BACKUP, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        backupData: data
+      }));
 
       return {
         success: true,
@@ -2143,7 +2588,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         message: `Errore nella lettura del file: ${err?.message || 'Formato JSON non valido'}`
       };
     }
-  }, [pushUndoSnapshot, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
+  }, [pushUndoSnapshot, maintenances, fixedCosts, trackedSpirals, dosagePresets, safeSetItem]);
 
   const getLastLocalBackupInfo = useCallback(() => {
     try {
@@ -2201,12 +2646,8 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const resetDosagePresets = useCallback(() => {
     setDosagePresets(DEFAULT_COFFEE_DOSAGE_PRESETS);
-    try {
-      localStorage.setItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(DEFAULT_COFFEE_DOSAGE_PRESETS));
-    } catch (e) {
-      console.error(e);
-    }
-  }, []);
+    safeSetItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(DEFAULT_COFFEE_DOSAGE_PRESETS));
+  }, [safeSetItem]);
 
   const exportSalesCSV = () => {
     try {
@@ -2224,7 +2665,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const csvContent = 'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
       const a = document.createElement('a');
       a.setAttribute('href', encodeURI(csvContent));
-      a.setAttribute('download', `report_incassi_negozio_${new Date().toISOString().slice(0, 10)}.csv`);
+      a.setAttribute('download', `report_incassi_negozio_${oggiLocale()}.csv`);
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -2239,15 +2680,17 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const label = customLabel || 'Salvataggio manuale operatore';
 
     try {
-      localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(machines));
-      localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
-      localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
-      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(restockHistory));
-      localStorage.setItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(maintenances));
-      localStorage.setItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(fixedCosts));
-      localStorage.setItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(trackedSpirals));
-      localStorage.setItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(dosagePresets));
-      localStorage.setItem(STORAGE_KEYS.LAST_SAVE_TIME, timestamp);
+      const coreSaveResults = [
+        safeSetItem(STORAGE_KEYS.MACHINES, JSON.stringify(machines)),
+        safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products)),
+        safeSetItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases)),
+        safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify(restockHistory)),
+        safeSetItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(maintenances)),
+        safeSetItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(fixedCosts)),
+        safeSetItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(trackedSpirals)),
+        safeSetItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(dosagePresets)),
+        safeSetItem(STORAGE_KEYS.LAST_SAVE_TIME, timestamp),
+      ];
 
       const snapshotData = {
         machines,
@@ -2260,7 +2703,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         dosagePresets,
       };
 
-      localStorage.setItem(STORAGE_KEYS.LAST_BACKUP, JSON.stringify({
+      const backupOk = safeSetItem(STORAGE_KEYS.LAST_BACKUP, JSON.stringify({
         timestamp,
         backupData: {
           app: 'M&S Take a Managment - Negozio H24',
@@ -2286,10 +2729,22 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       const raw = localStorage.getItem(STORAGE_KEYS.CHECKPOINTS);
       const prevCheckpoints: SaveCheckpoint[] = raw ? JSON.parse(raw) : [];
-      const updatedCheckpoints = [newCheckpoint, ...prevCheckpoints.filter(c => c.id !== newCheckpoint.id)].slice(0, 15);
-      localStorage.setItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(updatedCheckpoints));
-      setCheckpoints(updatedCheckpoints);
-      setLastSavedAt(timestamp);
+      const updatedCheckpoints = [newCheckpoint, ...prevCheckpoints.filter(c => c.id !== newCheckpoint.id)].slice(0, 3);
+      const cpOk = safeSetItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(updatedCheckpoints));
+      if (cpOk) {
+        try {
+          const afterRaw = localStorage.getItem(STORAGE_KEYS.CHECKPOINTS);
+          const afterParsed = afterRaw ? JSON.parse(afterRaw) : updatedCheckpoints;
+          setCheckpoints(Array.isArray(afterParsed) ? afterParsed : updatedCheckpoints);
+        } catch {
+          setCheckpoints(updatedCheckpoints);
+        }
+      }
+
+      const allSaved = coreSaveResults.every(Boolean) && backupOk && cpOk;
+      if (allSaved) {
+        setLastSavedAt(timestamp);
+      }
 
       // Sincronizza contemporaneamente nel database PostgreSQL Supabase nel cloud
       if (isSupabaseConfigured()) {
@@ -2310,6 +2765,14 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         });
       }
 
+      if (!allSaved) {
+        return {
+          success: false,
+          timestamp,
+          message: 'Salvataggio non riuscito: memoria del browser piena. Esporta subito il backup.'
+        };
+      }
+
       return {
         success: true,
         timestamp,
@@ -2323,11 +2786,22 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         message: `Errore durante il salvataggio: ${err?.message || 'Memoria piena o non accessibile'}`
       };
     }
-  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets]);
+  }, [machines, products, purchases, restockHistory, maintenances, fixedCosts, trackedSpirals, dosagePresets, safeSetItem]);
 
   const restoreCheckpoint = useCallback((checkpointId: string): { success: boolean; message: string } => {
     try {
-      const target = checkpoints.find(c => c.id === checkpointId);
+      let target = checkpoints.find(c => c.id === checkpointId);
+      if (!target) {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEYS.CHECKPOINTS);
+          const parsed: SaveCheckpoint[] = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(parsed)) {
+            target = parsed.find(c => c.id === checkpointId);
+          }
+        } catch {
+          // ignore
+        }
+      }
       if (!target || !target.data) {
         return { success: false, message: 'Punto di salvataggio non trovato.' };
       }
@@ -2342,14 +2816,14 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (Array.isArray(data.trackedSpirals)) setTrackedSpirals(data.trackedSpirals);
       if (Array.isArray(data.dosagePresets)) setDosagePresets(data.dosagePresets);
 
-      if (Array.isArray(data.machines)) localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(data.machines));
-      if (Array.isArray(data.products)) localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(data.products));
-      if (Array.isArray(data.purchases)) localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(data.purchases));
-      if (Array.isArray(data.restockHistory)) localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(data.restockHistory));
-      if (Array.isArray(data.maintenances)) localStorage.setItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(data.maintenances));
-      if (Array.isArray(data.fixedCosts)) localStorage.setItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(data.fixedCosts));
-      if (Array.isArray(data.trackedSpirals)) localStorage.setItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(data.trackedSpirals));
-      if (Array.isArray(data.dosagePresets)) localStorage.setItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(data.dosagePresets));
+      if (Array.isArray(data.machines)) safeSetItem(STORAGE_KEYS.MACHINES, JSON.stringify(data.machines));
+      if (Array.isArray(data.products)) safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(data.products));
+      if (Array.isArray(data.purchases)) safeSetItem(STORAGE_KEYS.PURCHASES, JSON.stringify(data.purchases));
+      if (Array.isArray(data.restockHistory)) safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify(data.restockHistory));
+      if (Array.isArray(data.maintenances)) safeSetItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(data.maintenances));
+      if (Array.isArray(data.fixedCosts)) safeSetItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(data.fixedCosts));
+      if (Array.isArray(data.trackedSpirals)) safeSetItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(data.trackedSpirals));
+      if (Array.isArray(data.dosagePresets)) safeSetItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(data.dosagePresets));
 
       return {
         success: true,
@@ -2359,19 +2833,13 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       console.error('Errore ripristino checkpoint', err);
       return { success: false, message: `Errore durante il ripristino: ${err?.message || 'dati corrotti'}` };
     }
-  }, [checkpoints, pushUndoSnapshot]);
+  }, [checkpoints, pushUndoSnapshot, safeSetItem]);
 
   const deleteCheckpoint = useCallback((checkpointId: string) => {
-    setCheckpoints(prev => {
-      const next = prev.filter(c => c.id !== checkpointId);
-      try {
-        localStorage.setItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(next));
-      } catch (e) {
-        console.error(e);
-      }
-      return next;
-    });
-  }, []);
+    const next = checkpoints.filter(c => c.id !== checkpointId);
+    setCheckpoints(next);
+    safeSetItem(STORAGE_KEYS.CHECKPOINTS, JSON.stringify(next));
+  }, [checkpoints, safeSetItem]);
 
   const restoreLastPreConfirmBackup = useCallback((): { success: boolean; message: string } => {
     if (!lastPreConfirmBackup || !lastPreConfirmBackup.id) {
@@ -2521,18 +2989,14 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             setTrackedSpirals(remoteTrackedSpirals);
             setDosagePresets(remoteDosagePresets);
 
-            try {
-              localStorage.setItem(STORAGE_KEYS.MACHINES, JSON.stringify(remoteMachines));
-              localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(remoteProducts));
-              localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(remotePurchases));
-              localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(remoteHistory));
-              localStorage.setItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(remoteMaintenances));
-              localStorage.setItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(remoteFixedCosts));
-              localStorage.setItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(remoteTrackedSpirals));
-              localStorage.setItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(remoteDosagePresets));
-            } catch (storageErr) {
-              console.warn('[Supabase -> localStorage] Errore salvataggio locale:', storageErr);
-            }
+            safeSetItem(STORAGE_KEYS.MACHINES, JSON.stringify(remoteMachines));
+            safeSetItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(remoteProducts));
+            safeSetItem(STORAGE_KEYS.PURCHASES, JSON.stringify(remotePurchases));
+            safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify(remoteHistory));
+            safeSetItem(STORAGE_KEYS.MAINTENANCE, JSON.stringify(remoteMaintenances));
+            safeSetItem(STORAGE_KEYS.FIXED_COSTS, JSON.stringify(remoteFixedCosts));
+            safeSetItem(STORAGE_KEYS.TRACKED_SPIRALS, JSON.stringify(remoteTrackedSpirals));
+            safeSetItem(STORAGE_KEYS.DOSAGE_PRESETS, JSON.stringify(remoteDosagePresets));
 
             armedCooldown = true;
             syncCooldownTimerRef.current = setTimeout(() => {
@@ -2579,7 +3043,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isRemoteSyncingRef.current = false;
       }
     }
-  }, []);
+  }, [safeSetItem]);
 
   // Forza sincronizzazione manuale di tutto il database su Supabase
   const forceCloudSync = useCallback(async (): Promise<{ success: boolean; message: string }> => {
@@ -2859,6 +3323,8 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         forceCloudSync,
         saveSupabaseCredentials,
         loadFromSupabaseCloud,
+        storageSaveError,
+        lastSaveSucceeded,
       }}
     >
       {children}

@@ -37,7 +37,7 @@ import {
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
 import { InteractiveDatePicker } from './common/InteractiveDatePicker';
-import { formatEuro, formatPercent, CATEGORY_META } from '../utils/vendingUtils';
+import { formatEuro, formatPercent, CATEGORY_META, oggiLocale, costoUnitarioLotto, roundUnitCost } from '../utils/vendingUtils';
 import { Product, ProductCategory, PurchaseBatch } from '../types';
 import { ManageDosagePresetsModal } from './coffee/ManageDosagePresetsModal';
 import { SmartNumberInput } from './common/SmartNumberInput';
@@ -63,6 +63,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
     updateProduct,
     appVersionMode,
     savePreviousStateBackup,
+    restoreCheckpoint,
     restoreLastPreConfirmBackup,
     lastPreConfirmBackup
   } = useVending();
@@ -83,7 +84,16 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
   const [warehouseToast, setWarehouseToast] = useState<{
     message: string;
     showUndo: boolean;
+    checkpointId?: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (!warehouseToast) return;
+    const timer = setTimeout(() => {
+      setWarehouseToast(null);
+    }, 30000);
+    return () => clearTimeout(timer);
+  }, [warehouseToast]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -110,7 +120,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
   const [hasInitialBatch, setHasInitialBatch] = useState(false);
   const [bSupplier, setBSupplier] = useState('');
   const [bInvoiceRef, setBInvoiceRef] = useState('');
-  const [bDate, setBDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [bDate, setBDate] = useState<string>(() => oggiLocale());
   const [bPackageCount, setBPackageCount] = useState<number | ''>('');
   const [bUnitsPerPackage, setBUnitsPerPackage] = useState<number | ''>('');
   const [bPriceType, setBPriceType] = useState<'per_pezzo' | 'per_confezione' | 'totale'>('per_pezzo');
@@ -124,7 +134,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
   const [quickLotProduct, setQuickLotProduct] = useState<Product | null>(null);
   const [lotSupplier, setLotSupplier] = useState('');
   const [lotInvoiceRef, setLotInvoiceRef] = useState('');
-  const [lotDate, setLotDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [lotDate, setLotDate] = useState<string>(() => oggiLocale());
   const [lotPackageCount, setLotPackageCount] = useState<number | ''>('');
   const [lotUnitsPerPackage, setLotUnitsPerPackage] = useState<number | ''>('');
   const [lotPriceInputType, setLotPriceInputType] = useState<'per_pezzo' | 'per_confezione' | 'totale'>('per_pezzo');
@@ -205,6 +215,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
 
   // Confirm delete modals
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
+  const [deleteBlockedMessage, setDeleteBlockedMessage] = useState<string | null>(null);
   const [isClearAllConfirmOpen, setIsClearAllConfirmOpen] = useState(false);
 
   // Mappa di quanti pezzi di ciascun prodotto sono attualmente nei distributori
@@ -218,21 +229,27 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
     return map;
   }, [machines]);
 
+  const activeProducts = useMemo(() => products.filter(p => !p.archived), [products]);
+
   // Calcolo KPI del magazzino
   const totalWarehouseUnits = useMemo(() => {
-    return products.reduce((acc, p) => acc + (p.warehouseStock || 0), 0);
-  }, [products]);
+    return activeProducts.reduce((acc, p) => acc + (p.warehouseStock || 0), 0);
+  }, [activeProducts]);
 
   const totalWarehouseValue = useMemo(() => {
-    return purchases.reduce((acc, b) => acc + (b.remainingUnits * (b.unitCostWithVat || b.unitCostNet)), 0);
-  }, [purchases]);
+    const activeProductIds = new Set(activeProducts.map(p => p.id));
+    return purchases.reduce(
+      (acc, b) => (activeProductIds.has(b.productId) ? acc + (b.remainingUnits * costoUnitarioLotto(b)) : acc),
+      0
+    );
+  }, [purchases, activeProducts]);
 
   const lowStockProductsCount = useMemo(() => {
-    return products.filter(p => {
+    return activeProducts.filter(p => {
       const threshold = p.warehouseAlertThreshold ?? 8;
       return (p.warehouseStock || 0) <= threshold;
     }).length;
-  }, [products]);
+  }, [activeProducts]);
 
   const totalInMachinesUnits = useMemo(() => {
     return machines.reduce((acc, m) => acc + m.slots.reduce((s, slot) => s + slot.currentStock, 0), 0);
@@ -240,7 +257,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
 
   // Prodotti filtrati
   const filteredProducts = useMemo(() => {
-    return products.filter(p => {
+    return activeProducts.filter(p => {
       const matchSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         p.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
         (p.description && p.description.toLowerCase().includes(searchQuery.toLowerCase()));
@@ -256,7 +273,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
 
       return matchSearch && matchCat && matchStatus;
     });
-  }, [products, searchQuery, selectedCategory, stockStatusFilter]);
+  }, [activeProducts, searchQuery, selectedCategory, stockStatusFilter]);
 
   const requestStockChange = (product: Product, newStock: number) => {
     const clampedNewStock = Math.max(0, newStock);
@@ -270,11 +287,12 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
       newValue: clampedNewStock,
       unitCost: product.unitCost,
       onConfirmAction: () => {
-        savePreviousStateBackup(`Modifica scorta magazzino ${product.name}`);
+        const savedCp = savePreviousStateBackup(`Modifica scorta magazzino ${product.name}`);
         updateWarehouseStock(product.id, clampedNewStock);
         setWarehouseToast({
           message: `Giacenza di "${product.name}" aggiornata a ${clampedNewStock} ${product.unit}. Salvata copia di backup precedente.`,
-          showUndo: true
+          showUndo: true,
+          checkpointId: savedCp.id,
         });
         setConfirmModalData(null);
       }
@@ -291,15 +309,16 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
       unit: product.unit,
       oldValue: batch.remainingUnits,
       newValue: clampedNewUnits,
-      unitCost: batch.unitCostWithVat,
+      unitCost: costoUnitarioLotto(batch),
       batchNumber: batch.batchNumber,
       invoiceRef: batch.invoiceRef,
       onConfirmAction: () => {
-        savePreviousStateBackup(`Modifica rimanenza lotto ${batch.batchNumber} (${product.name})`);
+        const savedCp = savePreviousStateBackup(`Modifica rimanenza lotto ${batch.batchNumber} (${product.name})`);
         updateBatchUnits(batch.id, clampedNewUnits);
         setWarehouseToast({
           message: `Lotto ${batch.batchNumber} (${product.name}) aggiornato a ${clampedNewUnits} ${product.unit}. Salvata copia di backup precedente.`,
-          showUndo: true
+          showUndo: true,
+          checkpointId: savedCp.id,
         });
         setConfirmModalData(null);
       }
@@ -328,7 +347,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
     setHasInitialBatch(false);
     setBSupplier('');
     setBInvoiceRef('');
-    setBDate(new Date().toISOString().slice(0, 10));
+    setBDate(oggiLocale());
     setBPackageCount('');
     setBUnitsPerPackage('');
     setBPriceType('per_pezzo');
@@ -413,9 +432,9 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
   }
 
   const calcBatchTotalVat = Math.max(0, calcBatchTotalGross - calcBatchTotalTaxable);
-  // Arrotondamento ai centesimi (es. 0.537 -> 0.54)
-  const calcBatchUnitCostNet = calcBatchTotalUnits > 0 ? Math.round((calcBatchTotalTaxable / calcBatchTotalUnits) * 100) / 100 : 0;
-  const calcBatchUnitCostWithVat = calcBatchTotalUnits > 0 ? Math.round((calcBatchTotalGross / calcBatchTotalUnits) * 100) / 100 : 0;
+  // Precisione a 4 decimali per i costi unitari
+  const calcBatchUnitCostNet = calcBatchTotalUnits > 0 ? roundUnitCost(calcBatchTotalTaxable / calcBatchTotalUnits) : 0;
+  const calcBatchUnitCostWithVat = calcBatchTotalUnits > 0 ? roundUnitCost(calcBatchTotalGross / calcBatchTotalUnits) : 0;
 
   // Dynamic profit preview in Add Modal (utilizzando costo ivato come richiesto per mostrare i prezzi IVA compresa)
   const effectiveCostInAdd = hasInitialBatch ? calcBatchUnitCostWithVat : pUnitCost;
@@ -442,7 +461,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
         category: pCategory,
         unit: pUnit.trim() || 'pz',
         defaultPrice: pDefaultPrice,
-        unitCost: hasInitialBatch ? calcBatchUnitCostNet : pUnitCost,
+        unitCost: hasInitialBatch ? calcBatchUnitCostWithVat : roundUnitCost(pUnitCost),
         warehouseStock: initialStock,
         warehouseAlertThreshold: pWarehouseAlertThreshold >= 0 ? pWarehouseAlertThreshold : 8,
         description: pDescription.trim(),
@@ -471,7 +490,7 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
     setQuickLotProduct(product);
     setLotSupplier('');
     setLotInvoiceRef('');
-    setLotDate(new Date().toISOString().slice(0, 10));
+    setLotDate(oggiLocale());
     setLotPriceInputType('per_pezzo');
     setLotIsWithoutVat(true);
     setLotPackageCount('');
@@ -754,8 +773,8 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
               const activeBatches = productBatches.filter(b => b.remainingUnits > 0);
               const activeFifoBatch = activeBatches[0];
               const activeUnitCostNet = activeFifoBatch ? activeFifoBatch.unitCostNet : product.unitCost;
-              const activeUnitCostWithVat = activeFifoBatch ? activeFifoBatch.unitCostWithVat : (product.unitCost * 1.22);
-              const productStockValue = productBatches.reduce((sum, b) => sum + (b.remainingUnits * (b.unitCostWithVat || b.unitCostNet)), 0);
+              const activeUnitCostWithVat = activeFifoBatch ? costoUnitarioLotto(activeFifoBatch) : product.unitCost;
+              const productStockValue = productBatches.reduce((sum, b) => sum + (b.remainingUnits * costoUnitarioLotto(b)), 0);
 
               const profit = product.defaultPrice - activeUnitCostWithVat;
               const marginPct = product.defaultPrice > 0 ? (profit / product.defaultPrice) * 100 : 0;
@@ -2345,8 +2364,8 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
                       qTaxable = qGross / (1 + lotVatRate / 100);
                     }
                   }
-                  const qUnitNet = qTotalUnits > 0 ? Math.round((qTaxable / qTotalUnits) * 100) / 100 : 0;
-                  const qUnitGross = qTotalUnits > 0 ? Math.round((qGross / qTotalUnits) * 100) / 100 : 0;
+                  const qUnitNet = qTotalUnits > 0 ? roundUnitCost(qTaxable / qTotalUnits) : 0;
+                  const qUnitGross = qTotalUnits > 0 ? roundUnitCost(qGross / qTotalUnits) : 0;
 
                   return (
                     <div className="pt-2 border-t border-emerald-200/60 flex items-center justify-between text-xs bg-emerald-100/90 p-2.5 rounded-lg border border-emerald-300 shadow-2xs">
@@ -2409,28 +2428,50 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
             <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center mx-auto mb-3">
               <Trash2 className="w-6 h-6" />
             </div>
-            <h3 className="font-bold text-stone-900 text-base">Eliminare questo articolo?</h3>
+            <h3 className="font-bold text-stone-900 text-base">Archiviare questo articolo?</h3>
             <p className="text-xs text-stone-500 mt-1.5">
-              Stai per rimuovere <strong>"{productToDelete.name}"</strong> e tutti i suoi lotti registrati dal magazzino. L'azione può essere annullata tramite la barra di notifica in basso.
+              Stai per archiviare <strong>"{productToDelete.name}"</strong> dal magazzino. Lo storico vendite rimane intatto e non sarà più visibile nel catalogo attivo.
             </p>
+            {deleteBlockedMessage && (
+              <div className="mt-3 p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 text-left font-semibold">
+                {deleteBlockedMessage}
+              </div>
+            )}
             <div className="mt-5 flex items-center justify-center space-x-2">
               <button
                 type="button"
-                onClick={() => setProductToDelete(null)}
-                className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold"
-              >
-                Annulla
-              </button>
-              <button
-                type="button"
                 onClick={() => {
-                  deleteProduct(productToDelete.id);
+                  setDeleteBlockedMessage(null);
                   setProductToDelete(null);
                 }}
-                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
+                className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold cursor-pointer"
               >
-                Sì, Elimina Articolo
+                {deleteBlockedMessage ? 'Chiudi' : 'Annulla'}
               </button>
+              {!deleteBlockedMessage && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = deleteProduct(productToDelete.id);
+                    if (!res.success) {
+                      setDeleteBlockedMessage(
+                        res.message || 'Prodotto ancora associato a una o più spirali.'
+                      );
+                      return;
+                    }
+                    setDeleteBlockedMessage(null);
+                    setProductToDelete(null);
+                    setWarehouseToast({
+                      message: res.message || `Articolo archiviato (storico vendite preservato).`,
+                      showUndo: true,
+                      checkpointId: res.checkpointId,
+                    });
+                  }}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
+                >
+                  Sì, Archivia Articolo
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -2547,7 +2588,9 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
               <button
                 type="button"
                 onClick={() => {
-                  const res = restoreLastPreConfirmBackup();
+                  const res = warehouseToast.checkpointId
+                    ? restoreCheckpoint(warehouseToast.checkpointId)
+                    : restoreLastPreConfirmBackup();
                   if (res.success) {
                     setWarehouseToast({
                       message: '↩ Copia precedente ripristinata con successo!',

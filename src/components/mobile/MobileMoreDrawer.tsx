@@ -45,6 +45,8 @@ export const MobileMoreDrawer: React.FC<MobileMoreDrawerProps> = ({
   const [isRestoreModalOpen, setIsRestoreModalOpen] = React.useState(false);
   const { 
     purchases,
+    machines,
+    products,
     exportBackupJSON, 
     exportSalesCSV, 
     resetAllDataToZero, 
@@ -53,7 +55,7 @@ export const MobileMoreDrawer: React.FC<MobileMoreDrawerProps> = ({
     undoLastAction 
   } = useVending();
 
-  const expirySummary = useMemo(() => getExpirySummary(purchases), [purchases]);
+  const expirySummary = useMemo(() => getExpirySummary(purchases, machines, products), [purchases, machines, products]);
 
   if (!isOpen) return null;
 

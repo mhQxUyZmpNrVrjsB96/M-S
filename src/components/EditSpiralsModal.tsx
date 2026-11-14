@@ -8,10 +8,10 @@ import {
   Search, 
   Info,
   AlertTriangle,
-  RotateCcw,
   ArrowUp,
   ArrowDown,
-  ArrowUpDown
+  ArrowUpDown,
+  Warehouse
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
 import { VendingMachine, Product, SpiralConfigUpdate } from '../types';
@@ -35,7 +35,31 @@ interface LocalSpiralRow {
   alertThreshold: number;
   currentStock: number;
   isNew?: boolean;
+  stockDisposition?: 'warehouse' | 'loss';
 }
+
+type PendingStockPrompt =
+  | {
+      mode: 'change_product';
+      slotId: string;
+      slotLabel: string;
+      oldProductName: string;
+      oldStock: number;
+      newProduct: Product;
+    }
+  | {
+      mode: 'delete_slot';
+      slotId: string;
+      slotLabel: string;
+      productName: string;
+      oldStock: number;
+    }
+  | {
+      mode: 'clear_all';
+      stockedCount: number;
+      totalUnits: number;
+    }
+  | null;
 
 export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({ 
   machine, 
@@ -44,12 +68,17 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
 }) => {
   const { 
     products, 
-    updateMachineSpirals, 
-    updateMachineSlot, 
-    deleteSlotFromMachine, 
-    clearAllSlotsFromMachine,
-    addSlotToMachine 
+    updateMachineSpirals,
   } = useVending();
+
+  const initialSlotsMapRef = useRef<Map<string, { productId: string; currentStock: number; salePrice: number }>>(
+    new Map(
+      machine.slots.map(s => [
+        s.id,
+        { productId: s.productId, currentStock: s.currentStock, salePrice: s.salePrice },
+      ])
+    )
+  );
 
   // Inizializza le righe con i valori correnti degli slot della macchina
   const [rows, setRows] = useState<LocalSpiralRow[]>(() => {
@@ -71,10 +100,10 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
   const [slotIdConfirmingDelete, setSlotIdConfirmingDelete] = useState<string | null>(null);
   const [isConfirmingClearAll, setIsConfirmingClearAll] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
-  const [pendingDeletedSlotIds, setPendingDeletedSlotIds] = useState<string[]>([]);
+  const [pendingDeletedSlots, setPendingDeletedSlots] = useState<Array<{ slotId: string; disposition?: 'warehouse' | 'loss' }>>([]);
+  const [pendingStockPrompt, setPendingStockPrompt] = useState<PendingStockPrompt>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSaved, setIsSaved] = useState(false);
-  const [showProductPickerForSlot, setShowProductPickerForSlot] = useState<string | null>(null);
   const [showUnsavedConfirm, setShowUnsavedConfirm] = useState(false);
 
   // Snapshot iniziale per verificare se ci sono modifiche non salvate
@@ -94,7 +123,7 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
   // Controlla se le righe attuali differiscono dallo snapshot iniziale
   const hasUnsavedChanges = useMemo(() => {
     if (isSaved) return false;
-    if (pendingDeletedSlotIds.length > 0) return true;
+    if (pendingDeletedSlots.length > 0) return true;
     const currentSnapshot = JSON.stringify(
       rows.map(r => ({
         id: r.slotId,
@@ -105,7 +134,7 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
       }))
     );
     return currentSnapshot !== initialSnapshotRef.current;
-  }, [rows, pendingDeletedSlotIds, isSaved]);
+  }, [rows, pendingDeletedSlots, isSaved]);
 
   const handleAttemptClose = () => {
     if (hasUnsavedChanges) {
@@ -121,11 +150,22 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
   const termPlural = isCoffee ? 'Cassetti' : 'Spirali';
   const termPluralLower = isCoffee ? 'cassetti' : 'spirali';
 
+  // Prodotti attivi (non archiviati) disponibili per l'associazione nel menu a tendina
+  const activeCatalogProducts = useMemo(() => {
+    return products.filter(p => !p.archived);
+  }, [products]);
+
   // Ricarica le righe solo se cambia il distributore selezionato
   const currentMachineIdRef = useRef(machine.id);
   useEffect(() => {
     if (currentMachineIdRef.current !== machine.id) {
       currentMachineIdRef.current = machine.id;
+      initialSlotsMapRef.current = new Map(
+        machine.slots.map(s => [
+          s.id,
+          { productId: s.productId, currentStock: s.currentStock, salePrice: s.salePrice },
+        ])
+      );
       const sortedSlots = [...machine.slots].sort((a, b) => compareSlotLabelsNumeric(a.label, b.label));
       setRows(
         sortedSlots.map(slot => {
@@ -142,7 +182,8 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
           };
         })
       );
-      setPendingDeletedSlotIds([]);
+      setPendingDeletedSlots([]);
+      setPendingStockPrompt(null);
       setSlotIdConfirmingDelete(null);
       setIsConfirmingClearAll(false);
     }
@@ -165,7 +206,7 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
   // Inserimento nuova spirale o nuovo cassetto
   const handleAddNewSpiral = () => {
     const nextIndex = rows.length + 1;
-    const defaultProduct = products[0] || { id: `prod-${Date.now()}`, name: 'Nuovo Prodotto', defaultPrice: 1.0 };
+    const defaultProduct = activeCatalogProducts[0] || products[0] || { id: `prod-${Date.now()}`, name: 'Nuovo Prodotto', defaultPrice: 1.0 };
     const newSlotId = `new-slot-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const newLabel = isCoffee ? `Cassetto ${nextIndex}` : `${nextIndex}`;
 
@@ -202,20 +243,110 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
     );
   };
 
-  // Assegna prodotto dal catalogo
+  // Cambio prodotto associato dal menu a tendina del catalogo
   const handleSelectCatalogProduct = (slotId: string, selectedProd: Product) => {
+    const targetRow = rows.find(r => r.slotId === slotId);
+    if (!targetRow || targetRow.productId === selectedProd.id) return;
+
+    const orig = initialSlotsMapRef.current.get(slotId);
+    // Se l'utente riporta il prodotto a quello iniziale prima di salvare, ripristina la giacenza originale
+    if (orig && selectedProd.id === orig.productId) {
+      setRows(prev =>
+        prev.map(r =>
+          r.slotId === slotId
+            ? {
+                ...r,
+                productId: selectedProd.id,
+                productName: selectedProd.name,
+                salePrice: orig.salePrice,
+                currentStock: orig.currentStock,
+                stockDisposition: undefined,
+              }
+            : r
+        )
+      );
+      return;
+    }
+
+    // Se la spirale ha ancora pezzi del vecchio prodotto, chiedi come gestirli prima di azzerare
+    if (!targetRow.isNew && targetRow.currentStock > 0) {
+      setPendingStockPrompt({
+        mode: 'change_product',
+        slotId,
+        slotLabel: targetRow.label,
+        oldProductName: targetRow.productName,
+        oldStock: targetRow.currentStock,
+        newProduct: selectedProd,
+      });
+      return;
+    }
+
     setRows(prev =>
-      prev.map(r => {
-        if (r.slotId !== slotId) return r;
-        return {
-          ...r,
-          productId: selectedProd.id,
-          productName: selectedProd.name,
-          salePrice: selectedProd.defaultPrice || r.salePrice,
-        };
-      })
+      prev.map(r =>
+        r.slotId === slotId
+          ? {
+              ...r,
+              productId: selectedProd.id,
+              productName: selectedProd.name,
+              salePrice: selectedProd.defaultPrice || r.salePrice,
+              currentStock: 0,
+            }
+          : r
+      )
     );
-    setShowProductPickerForSlot(null);
+  };
+
+  // Conferma scelta gestione pezzi rimasti (reso a magazzino o perdita)
+  const handleResolveStockPrompt = (disposition: 'warehouse' | 'loss') => {
+    if (!pendingStockPrompt) return;
+
+    if (pendingStockPrompt.mode === 'change_product') {
+      const { slotId, newProduct, oldStock } = pendingStockPrompt;
+      setRows(prev =>
+        prev.map(r =>
+          r.slotId === slotId
+            ? {
+                ...r,
+                productId: newProduct.id,
+                productName: newProduct.name,
+                salePrice: newProduct.defaultPrice || r.salePrice,
+                currentStock: 0,
+                stockDisposition: disposition,
+              }
+            : r
+        )
+      );
+      setStatusMessage({
+        text: `Prodotto aggiornato a "${newProduct.name}": i ${oldStock} pz precedenti verranno ${disposition === 'warehouse' ? 'resi al magazzino' : 'registrati come perdita'} al salvataggio.`,
+        type: 'info',
+      });
+    } else if (pendingStockPrompt.mode === 'delete_slot') {
+      const { slotId, slotLabel, productName, oldStock } = pendingStockPrompt;
+      setPendingDeletedSlots(prev => [...prev, { slotId, disposition }]);
+      setRows(prev => prev.filter(r => r.slotId !== slotId));
+      setSlotIdConfirmingDelete(null);
+      setStatusMessage({
+        text: `${termSingular} "${slotLabel}" (${productName}) rimossa dalla lista (${oldStock} pz → ${disposition === 'warehouse' ? 'magazzino' : 'perdita'}). Premi "Salva" per confermare.`,
+        type: 'info',
+      });
+    } else if (pendingStockPrompt.mode === 'clear_all') {
+      const toDelete = rows
+        .filter(r => !r.isNew)
+        .map(r => ({
+          slotId: r.slotId,
+          disposition: r.currentStock > 0 ? disposition : undefined,
+        }));
+      setPendingDeletedSlots(prev => [...prev, ...toDelete]);
+      setRows([]);
+      setIsConfirmingClearAll(false);
+      setStatusMessage({
+        text: `Tutti i ${termPluralLower} rimossi in bozza (pezzi residui → ${disposition === 'warehouse' ? 'magazzino' : 'perdita'}). Premi "Salva" per applicare.`,
+        type: 'info',
+      });
+    }
+
+    setPendingStockPrompt(null);
+    setTimeout(() => setStatusMessage(null), 4000);
   };
 
   // Richiesta eliminazione spirale o cassetto
@@ -223,36 +354,54 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
     setSlotIdConfirmingDelete(slotId);
   };
 
-  // Conferma eliminazione spirale o cassetto
+  // Conferma eliminazione spirale o cassetto (solo locale fino a "Salva")
   const handleConfirmDeleteRow = (slotId: string) => {
     const target = rows.find(r => r.slotId === slotId);
     if (!target) return;
 
-    // Se lo slot esisteva già a livello di database, eliminalo subito
-    if (!target.isNew) {
-      deleteSlotFromMachine(machine.id, slotId);
-      setPendingDeletedSlotIds(prev => [...prev, slotId]);
+    if (!target.isNew && target.currentStock > 0) {
+      setPendingStockPrompt({
+        mode: 'delete_slot',
+        slotId: target.slotId,
+        slotLabel: target.label,
+        productName: target.productName,
+        oldStock: target.currentStock,
+      });
+      return;
     }
 
-    // Rimuovi la riga dall'interfaccia corrente
+    if (!target.isNew) {
+      setPendingDeletedSlots(prev => [...prev, { slotId }]);
+    }
+
     setRows(prev => prev.filter(r => r.slotId !== slotId));
     setSlotIdConfirmingDelete(null);
 
     setStatusMessage({
-      text: `${termSingular} "${target.label}" (${target.productName}) eliminato con successo!`,
-      type: 'success'
+      text: `${termSingular} "${target.label}" (${target.productName}) rimossa in bozza. Premi "Salva" per confermare.`,
+      type: 'info'
     });
     setTimeout(() => setStatusMessage(null), 3500);
   };
 
-  // Elimina tutti i cassetti o le spirali di questo distributore
+  // Elimina tutti i cassetti o le spirali di questo distributore (solo locale fino a "Salva")
   const handleClearAllSpirals = () => {
-    clearAllSlotsFromMachine(machine.id);
+    const stockedExisting = rows.filter(r => !r.isNew && r.currentStock > 0);
+    if (stockedExisting.length > 0) {
+      setPendingStockPrompt({
+        mode: 'clear_all',
+        stockedCount: stockedExisting.length,
+        totalUnits: stockedExisting.reduce((sum, r) => sum + r.currentStock, 0),
+      });
+      return;
+    }
+
+    const toDelete = rows.filter(r => !r.isNew).map(r => ({ slotId: r.slotId }));
+    setPendingDeletedSlots(prev => [...prev, ...toDelete]);
     setRows([]);
-    setPendingDeletedSlotIds([]);
     setIsConfirmingClearAll(false);
     setStatusMessage({
-      text: `Tutti i ${termPluralLower} di "${machine.name}" sono stati rimossi con successo.`,
+      text: `Tutti i ${termPluralLower} rimossi in bozza. Premi "Salva" per confermare.`,
       type: 'info'
     });
     setTimeout(() => setStatusMessage(null), 3500);
@@ -297,28 +446,20 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
-  // Salva tutte le modifiche
+  // Salva tutte le modifiche in un'unica operazione atomica
   const handleSaveAll = () => {
-    // 1. Assicurati che tutti gli slot rimossi siano stati eliminati dal distributore
-    pendingDeletedSlotIds.forEach(slotId => {
-      deleteSlotFromMachine(machine.id, slotId);
-    });
-
-    // 2. Gestisci nuovi slot aggiunti
-    const newRows = rows.filter(r => r.isNew);
-    for (const newR of newRows) {
-      addSlotToMachine(machine.id, {
+    const newSlotsPayload = rows
+      .filter(r => r.isNew)
+      .map(newR => ({
         label: newR.label.trim() || termSingular,
         productId: newR.productId,
-        capacity: Math.max(1, newR.capacity),
+        capacity: Math.max(1, Math.round(newR.capacity)),
         currentStock: 0,
         alertThreshold: newR.alertThreshold,
         salePrice: newR.salePrice,
         lastRestockStock: 0,
-      });
-    }
+      }));
 
-    // 3. Prepara gli aggiornamenti per le righe esistenti rimaste
     const existingUpdates: SpiralConfigUpdate[] = rows
       .filter(r => !r.isNew)
       .map(r => ({
@@ -329,13 +470,15 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
         capacity: Math.max(1, Math.round(r.capacity)),
         salePrice: r.salePrice,
         alertThreshold: r.alertThreshold,
+        stockDisposition: r.stockDisposition,
       }));
 
     const orderedSlotIds = rows.filter(r => !r.isNew).map(r => r.slotId);
 
-    if (existingUpdates.length > 0) {
-      updateMachineSpirals(machine.id, existingUpdates, orderedSlotIds);
-    }
+    updateMachineSpirals(machine.id, existingUpdates, orderedSlotIds, {
+      deletedSlots: pendingDeletedSlots,
+      newSlots: newSlotsPayload,
+    });
 
     setIsSaved(true);
     setStatusMessage({
@@ -397,7 +540,7 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
           <div className="flex items-center space-x-2">
             <Info className="w-4 h-4 text-amber-700 shrink-0" />
             <span className="text-2xs sm:text-xs">
-              <strong>Sincronizzazione Automatica:</strong> Nomi {termPluralLower}, prodotti e capienze modificati qui saranno aggiornati subito anche nella <strong>⚡ Carica Rapida</strong> e nel catalogo.
+              <strong>Sincronizzazione Automatica:</strong> Tutte le modifiche (incluse eliminazioni e cambio prodotto) vengono applicate solo quando premi <strong>Salva</strong>.
             </span>
           </div>
           <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-2xs font-semibold bg-white text-amber-900 border border-amber-300 shrink-0">
@@ -515,8 +658,12 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
           <div className="space-y-3">
             {filteredRows.map((row) => {
               const rowIndex = rows.findIndex(r => r.slotId === row.slotId);
-              const isPickerOpen = showProductPickerForSlot === row.slotId;
               const isConfirmingDelete = slotIdConfirmingDelete === row.slotId;
+              const currentProdStillExists = products.find(p => p.id === row.productId);
+              const dropdownProducts =
+                currentProdStillExists && currentProdStillExists.archived
+                  ? [currentProdStillExists, ...activeCatalogProducts]
+                  : activeCatalogProducts;
 
               return (
                 <div 
@@ -598,10 +745,10 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
                           }}
                           onBlur={() => {
                             const trimmed = row.label.trim();
-                            if (!row.isNew && trimmed) {
-                              updateMachineSlot(machine.id, row.slotId, { label: trimmed });
+                            if (trimmed && trimmed !== row.label) {
+                              handleRowChange(row.slotId, 'label', trimmed);
                             }
-                            // Riordina automaticamente in ordine numerico progressivo spostando la riga
+                            // Riordina solo in locale in ordine numerico progressivo (salvato solo con Salva)
                             setRows(prev => [...prev].sort((a, b) => compareSlotLabelsNumeric(a.label, b.label)));
                           }}
                           onKeyDown={(e) => {
@@ -615,59 +762,34 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
                       </div>
                     </div>
 
-                    {/* 2. Nome del Prodotto */}
+                    {/* 2. Prodotto Associato (Menu a tendina dal catalogo) */}
                     <div className="md:col-span-3">
                       <div className="flex items-center justify-between mb-1">
                         <label className="block text-2xs font-bold text-stone-700 uppercase tracking-wide">
                           Prodotto Associato
                         </label>
-                        <button
-                          type="button"
-                          onClick={() => setShowProductPickerForSlot(isPickerOpen ? null : row.slotId)}
-                          className="text-2xs font-semibold text-amber-700 hover:text-amber-800 underline cursor-pointer"
-                        >
-                          {isPickerOpen ? 'Chiudi catalogo' : 'Scegli da catalogo'}
-                        </button>
                       </div>
 
-                      <div className="relative">
-                        <input
-                          id={`input-spiral-product-${row.slotId}`}
-                          type="text"
-                          value={row.productName}
-                          onChange={(e) => handleRowChange(row.slotId, 'productName', e.target.value)}
-                          onFocus={(e) => {
-                            e.target.select();
-                            try {
-                              e.target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                            } catch {}
-                          }}
-                          placeholder="Nome prodotto (es. Coca Cola 33cl)"
-                          className="w-full px-3 py-2 font-bold text-base sm:text-sm text-stone-900 bg-white border-2 border-stone-300 focus:border-amber-500 rounded-lg focus:ring-2 focus:ring-amber-400 focus:outline-hidden shadow-2xs"
-                        />
-                      </div>
-
-                      {/* Dropdown rapido per selezionare prodotto da catalogo esistente */}
-                      {isPickerOpen && (
-                        <div className="mt-2 p-2 bg-white rounded-lg border-2 border-amber-400 shadow-xl max-h-48 overflow-y-auto text-xs z-30 animate-in fade-in">
-                          <p className="text-2xs font-bold text-stone-500 px-2 py-1 uppercase">
-                            Seleziona articolo dal listino prodotti:
-                          </p>
-                          <div className="divide-y divide-stone-100">
-                            {products.map(p => (
-                              <button
-                                key={p.id}
-                                type="button"
-                                onClick={() => handleSelectCatalogProduct(row.slotId, p)}
-                                className="w-full text-left px-2 py-1.5 hover:bg-amber-50 rounded flex items-center justify-between transition-colors cursor-pointer"
-                              >
-                                <span className="font-semibold text-stone-800">{p.name}</span>
-                                <span className="text-stone-500 text-2xs font-mono">{formatEuro(p.defaultPrice)}</span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                      <select
+                        id={`input-spiral-product-${row.slotId}`}
+                        value={row.productId}
+                        onChange={(e) => {
+                          const selected = products.find(p => p.id === e.target.value);
+                          if (selected) {
+                            handleSelectCatalogProduct(row.slotId, selected);
+                          }
+                        }}
+                        className="w-full px-3 py-2 font-bold text-base sm:text-sm text-stone-900 bg-white border-2 border-stone-300 focus:border-amber-500 rounded-lg focus:ring-2 focus:ring-amber-400 focus:outline-hidden shadow-2xs cursor-pointer"
+                      >
+                        {!currentProdStillExists && (
+                          <option value={row.productId}>{row.productName} (non in catalogo)</option>
+                        )}
+                        {dropdownProducts.map(p => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}{p.archived ? ' (archiviato)' : ''} — {formatEuro(p.defaultPrice)}
+                          </option>
+                        ))}
+                      </select>
                     </div>
 
                     {/* 3. Quantità Massima per la Spirale (Capienza) */}
@@ -750,6 +872,13 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
                       <span>
                         Giacenza attuale: <strong className="text-stone-700">{row.currentStock} pz</strong>
                       </span>
+                      {row.stockDisposition && (
+                        <span className="text-3xs font-semibold px-2 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-200">
+                          {row.stockDisposition === 'warehouse'
+                            ? 'Pezzi precedenti → Reso a magazzino (al salvataggio)'
+                            : 'Pezzi precedenti → Perdita registrata (al salvataggio)'}
+                        </span>
+                      )}
                     </div>
 
                     {row.currentStock > row.capacity && (
@@ -851,6 +980,84 @@ export const EditSpiralsModal: React.FC<EditSpiralsModalProps> = ({
         }}
         onCancelStay={() => setShowUnsavedConfirm(false)}
       />
+
+      {/* Modale scelta gestione pezzi rimasti (cambio prodotto o eliminazione spirale con giacenza > 0) */}
+      {pendingStockPrompt && (
+        <div className="fixed inset-0 z-[60] bg-stone-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-stone-200 shadow-2xl max-w-md w-full p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start space-x-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-stone-900">
+                  {pendingStockPrompt.mode === 'change_product'
+                    ? `Pezzi ancora presenti in ${pendingStockPrompt.slotLabel}`
+                    : pendingStockPrompt.mode === 'delete_slot'
+                      ? `Eliminazione ${termSingularLower} "${pendingStockPrompt.slotLabel}" con giacenza`
+                      : `Rimozione di tutti i ${termPluralLower} con giacenza`}
+                </h3>
+                <p className="text-xs text-stone-600 mt-1">
+                  {pendingStockPrompt.mode === 'change_product' && (
+                    <>
+                      La {termSingularLower} <strong>{pendingStockPrompt.slotLabel}</strong> contiene ancora{' '}
+                      <strong>{pendingStockPrompt.oldStock} pz</strong> di <strong>{pendingStockPrompt.oldProductName}</strong>.
+                      Prima di associare <strong>{pendingStockPrompt.newProduct.name}</strong> e azzerare la {termSingularLower}, cosa vuoi fare dei pezzi rimasti?
+                    </>
+                  )}
+                  {pendingStockPrompt.mode === 'delete_slot' && (
+                    <>
+                      La {termSingularLower} <strong>{pendingStockPrompt.slotLabel}</strong> ({pendingStockPrompt.productName}) contiene ancora{' '}
+                      <strong>{pendingStockPrompt.oldStock} pz</strong>. Cosa vuoi fare dei pezzi rimasti?
+                    </>
+                  )}
+                  {pendingStockPrompt.mode === 'clear_all' && (
+                    <>
+                      Ci sono ancora <strong>{pendingStockPrompt.totalUnits} pz</strong> distribuiti in{' '}
+                      <strong>{pendingStockPrompt.stockedCount}</strong> {termPluralLower}. Cosa vuoi fare dei pezzi rimasti?
+                    </>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2 pt-1">
+              <button
+                type="button"
+                id="btn-stock-disposition-warehouse"
+                onClick={() => handleResolveStockPrompt('warehouse')}
+                className="w-full flex items-center justify-between px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+              >
+                <span className="flex items-center space-x-2">
+                  <Warehouse className="w-4 h-4" />
+                  <span>Rendi al magazzino (riaccredita al lotto d'origine)</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                id="btn-stock-disposition-loss"
+                onClick={() => handleResolveStockPrompt('loss')}
+                className="w-full flex items-center justify-between px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+              >
+                <span className="flex items-center space-x-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>Registra come perdita (scarto/scadenza)</span>
+                </span>
+              </button>
+
+              <button
+                type="button"
+                id="btn-stock-disposition-cancel"
+                onClick={() => setPendingStockPrompt(null)}
+                className="w-full px-4 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Annulla
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

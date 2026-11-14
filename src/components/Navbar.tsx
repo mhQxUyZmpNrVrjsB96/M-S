@@ -120,6 +120,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab, onSwitc
   const { 
     purchases,
     products,
+    machines,
     openRestockModal, 
     resetAllDataToZero,
     exportBackupJSON,
@@ -162,12 +163,13 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab, onSwitc
     };
   }, []);
 
-  // Calcola scadenze e allarmi a 2 settimane (14 giorni)
-  const expirySummary = useMemo(() => getExpirySummary(purchases), [purchases]);
+  // Calcola scadenze e allarmi a 2 settimane (14 giorni) su magazzino e spirali
+  const expirySummary = useMemo(() => getExpirySummary(purchases, machines, products), [purchases, machines, products]);
 
   // Calcola articoli a magazzino sotto la soglia di allerta personalizzata
   const warehouseAlertCount = useMemo(() => {
     return products.filter(p => {
+      if (p.archived) return false;
       const threshold = p.warehouseAlertThreshold ?? 8;
       return (p.warehouseStock || 0) <= threshold;
     }).length;

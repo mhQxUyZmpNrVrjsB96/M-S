@@ -266,9 +266,9 @@ export function calculateCoffeeMachineAnalytics(
   }
 
   // 4. Calcola le metriche dettagliate per ogni cassetto bevanda
-  const activeDispensesTotal = (periodDispenses && periodDispenses > 0) 
-    ? periodDispenses 
-    : (totalHistoricalDispenses > 0 ? totalHistoricalDispenses : 100); // 100 come base illustrativa se vuoto
+  const activeDispensesTotal = (periodDispenses !== undefined)
+    ? Math.max(0, periodDispenses)
+    : (totalHistoricalDispenses > 0 ? totalHistoricalDispenses : 0);
 
   const breakdown: BeverageBreakdownItem[] = [];
 

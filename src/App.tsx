@@ -19,6 +19,7 @@ import { MobileAppLayout } from './components/mobile/MobileAppLayout';
 import { TabletAppLayout } from './components/tablet/TabletAppLayout';
 import { Smartphone, Tablet, Monitor, Check } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { StorageErrorBanner } from './components/StorageErrorBanner';
 
 function MainLayout() {
   const [currentTab, setCurrentTab] = useState<NavTab>('quick_restock');
@@ -152,6 +153,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <VendingProvider>
+        <StorageErrorBanner />
         <MainLayout />
       </VendingProvider>
     </ErrorBoundary>

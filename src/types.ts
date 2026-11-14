@@ -19,6 +19,7 @@ export interface Product {
   imageUrl?: string;
   description?: string;
   coffeeConfig?: CoffeeDosageConfig; // Configurazione per caffè e solubili (grammi a dose, resa confezione)
+  archived?: boolean; // Se true, il prodotto è archiviato ma preservato per lo storico vendite
 }
 
 export interface PurchaseBatch {
@@ -96,6 +97,7 @@ export interface SpiralConfigUpdate {
   capacity: number; // quantità massima per ogni spirale
   salePrice?: number;
   alertThreshold?: number;
+  stockDisposition?: 'warehouse' | 'loss';
 }
 
 export type MachineStatus = 'operativo' | 'in_esaurimento' | 'critico' | 'manutenzione';
@@ -163,6 +165,7 @@ export interface RestockItemRecord {
   addedUnitCost?: number;
   potentialProfit?: number;
   marginPct?: number;
+  removedLoss?: number; // Costo dei pezzi tolti per scadenza/scarto (non resi a magazzino)
 }
 
 export interface RestockSession {
@@ -176,6 +179,7 @@ export interface RestockSession {
   totalRevenue: number;
   totalCost: number;
   totalProfit: number;
+  totalRemovedLoss?: number; // Perdita totale per scadenze/scarti nella sessione
   cashCollected?: number;
   operatorNotes?: string;
   coffeeCounterPrevious?: number; // Lettura contatore precedente

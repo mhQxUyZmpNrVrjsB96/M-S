@@ -18,7 +18,7 @@ import {
   PieChart as PieIcon
 } from 'lucide-react';
 import { VendingMachine, Product, PurchaseBatch, MachineSlot, RestockSession } from '../../types';
-import { formatEuro, formatPercent, calculateFifoLoadPlan } from '../../utils/vendingUtils';
+import { formatEuro, formatPercent, calculateFifoLoadPlan, getSlotActiveCost } from '../../utils/vendingUtils';
 import { calculateCoffeeMachineAnalytics, DEFAULT_COFFEE_PRESETS, BeverageBreakdownItem } from '../../utils/coffeeUtils';
 import { ManageDosagePresetsModal } from './ManageDosagePresetsModal';
 import { SmartNumberInput } from '../common/SmartNumberInput';
@@ -43,9 +43,7 @@ export const CoffeeRestockView: React.FC<CoffeeRestockViewProps> = ({
   const [isDosageModalOpen, setIsDosageModalOpen] = useState(false);
   // 1. Contatore battute erogazioni
   const previousCounter = machine.coffeeCounterCurrent || machine.coffeeCounterLastRestock || 0;
-  const [currentCounterInput, setCurrentCounterInput] = useState<number | ''>(() => {
-    return previousCounter > 0 ? previousCounter + 150 : 150;
-  });
+  const [currentCounterInput, setCurrentCounterInput] = useState<number | ''>(() => previousCounter);
 
   const dispensesDelta = useMemo(() => {
     if (typeof currentCounterInput !== 'number') return 0;
@@ -59,13 +57,14 @@ export const CoffeeRestockView: React.FC<CoffeeRestockViewProps> = ({
 
   // 3. Incasso rilevato
   const [revenueInput, setRevenueInput] = useState<number | ''>('');
+  const [revenueManuallyEdited, setRevenueManuallyEdited] = useState<boolean>(false);
   const [cashCollected, setCashCollected] = useState<number | ''>('');
   const [operatorNotes, setOperatorNotes] = useState<string>('');
   const [isSaved, setIsSaved] = useState(false);
   const [showDosageConfig, setShowDosageConfig] = useState(false);
   const [customDosages, setCustomDosages] = useState<Record<string, number>>({});
 
-  // Inizializza i cassetti
+  // Inizializza i cassetti al cambio macchina o dopo un salvataggio
   useEffect(() => {
     const initialAdded: Record<string, number> = {};
     const initialDosages: Record<string, number> = {};
@@ -76,19 +75,28 @@ export const CoffeeRestockView: React.FC<CoffeeRestockViewProps> = ({
       initialDosages[slot.id] = slot.dosageConfig?.gramsPerDose || (isUtility ? 1 : 10);
     });
 
+    const resetPrev = machine.coffeeCounterCurrent || machine.coffeeCounterLastRestock || 0;
+    setCurrentCounterInput(resetPrev);
+    setRevenueInput('');
+    setRevenueManuallyEdited(false);
+    setCashCollected('');
     setAddedItems(initialAdded);
     setCustomDosages(initialDosages);
     setIsSaved(false);
   }, [machine]);
 
-  // Stima automatica dell'incasso in base alle erogazioni (prezzo medio ~0.55€)
+  // Stima automatica dell'incasso in base alle erogazioni solo se l'utente non ha inserito un incasso manuale
   useEffect(() => {
-    if (dispensesDelta > 0 && revenueInput === '') {
+    if (revenueManuallyEdited) return;
+    if (dispensesDelta > 0) {
       const estimatedRev = Number((dispensesDelta * 0.55).toFixed(2));
       setRevenueInput(estimatedRev);
       setCashCollected(estimatedRev);
+    } else {
+      setRevenueInput('');
+      setCashCollected('');
     }
-  }, [dispensesDelta, revenueInput]);
+  }, [dispensesDelta, revenueManuallyEdited]);
 
   // Calcolo delle disponibilità a magazzino
   const getAvailableWarehouse = (productId: string, currentSlotId: string) => {
@@ -156,7 +164,7 @@ export const CoffeeRestockView: React.FC<CoffeeRestockViewProps> = ({
       restockHistory,
       typeof currentCounterInput === 'number' ? currentCounterInput : previousCounter,
       previousCounter,
-      dispensesDelta > 0 ? dispensesDelta : 100,
+      dispensesDelta,
       effectiveRevenue
     );
   }, [machine, products, restockHistory, currentCounterInput, previousCounter, dispensesDelta, effectiveRevenue]);
@@ -183,14 +191,39 @@ export const CoffeeRestockView: React.FC<CoffeeRestockViewProps> = ({
     const finalCost = Number(totalAddedCost.toFixed(2));
     const finalProfit = Number((finalRevenue - finalCost).toFixed(2));
 
-    // Ripartisci il venduto teorico sulle singole bevande e accessori
+    // Ripartisci il venduto teorico sulle singole bevande e accessori convertendo le tazze in confezioni o grammi
     const items = slotCalculations.map(sc => {
       const breakdownMatch = coffeeAnalytics.drinksBreakdown.find(d => d.slotId === sc.slot.id) 
         || coffeeAnalytics.utilitiesBreakdown.find(u => u.slotId === sc.slot.id);
 
-      const estimatedSold = breakdownMatch ? breakdownMatch.estimatedCupsSold : 0;
+      const estimatedCups = breakdownMatch ? breakdownMatch.estimatedCupsSold : 0;
       const estimatedRev = breakdownMatch ? breakdownMatch.estimatedRevenue : 0;
-      const estimatedCost = sc.addedCost > 0 ? sc.addedCost : (breakdownMatch?.estimatedTotalCost || 0);
+
+      // Conversione tazze -> confezioni consumate (o grammi se gestito a grammi)
+      const prodCfg = sc.prod?.coffeeConfig || sc.slot.dosageConfig;
+      const unitLower = (sc.prod?.unit || '').trim().toLowerCase();
+      const isGramsUnit = unitLower === 'g' || unitLower === 'gr' || unitLower === 'grammi' || unitLower === 'grammo';
+      const gramsPerDose = customDosages[sc.slot.id] || prodCfg?.gramsPerDose || sc.gramsPerDose || (sc.isUtility ? 1 : 7);
+      const packageGrams = prodCfg?.packageGrams || sc.packageGrams || (sc.isUtility ? 100 : 1000);
+
+      let consumedUnits = 0;
+      if (estimatedCups > 0) {
+        if (isGramsUnit) {
+          consumedUnits = estimatedCups * gramsPerDose;
+        } else if (prodCfg?.dosesPerPackage && prodCfg.dosesPerPackage > 0) {
+          consumedUnits = estimatedCups / prodCfg.dosesPerPackage;
+        } else if (packageGrams > 0) {
+          consumedUnits = (estimatedCups * gramsPerDose) / packageGrams;
+        } else {
+          consumedUnits = estimatedCups;
+        }
+      }
+      const unitsSold = Number(consumedUnits.toFixed(4));
+
+      const slotActiveCost = getSlotActiveCost(sc.slot, sc.prod, purchases).unitCost || sc.prod?.unitCost || sc.addedUnitCost || 0;
+      const estimatedCost = Number((unitsSold * slotActiveCost).toFixed(2));
+      const countedAfterConsumption = Math.max(0, Number((sc.slot.currentStock - unitsSold).toFixed(4)));
+      const newStockAfterRefill = Math.max(0, Number((countedAfterConsumption + sc.addedQty).toFixed(4)));
 
       return {
         slotId: sc.slot.id,
@@ -200,15 +233,15 @@ export const CoffeeRestockView: React.FC<CoffeeRestockViewProps> = ({
         batchId: sc.loadPlan.allocations[0]?.batchId,
         batchNumber: sc.loadPlan.allocations[0]?.batchNumber,
         previousStock: sc.slot.currentStock,
-        countedRemaining: Math.max(0, sc.slot.currentStock),
-        unitsSold: estimatedSold,
+        countedRemaining: countedAfterConsumption,
+        unitsSold,
         salePrice: sc.slot.salePrice || 0.50,
-        unitCost: sc.addedUnitCost,
+        unitCost: slotActiveCost,
         revenue: estimatedRev,
         cost: estimatedCost,
-        profit: estimatedRev - estimatedCost,
+        profit: Number((estimatedRev - estimatedCost).toFixed(2)),
         addedStock: sc.addedQty,
-        newStock: Math.max(0, sc.slot.currentStock + sc.addedQty),
+        newStock: newStockAfterRefill,
         loadedAllocations: sc.loadPlan.allocations,
         addedCost: sc.addedCost,
         addedUnitCost: sc.addedUnitCost,
@@ -326,7 +359,10 @@ export const CoffeeRestockView: React.FC<CoffeeRestockViewProps> = ({
                 min={0}
                 allowDecimals={true}
                 value={revenueInput === '' ? 0 : revenueInput}
-                onNumberChange={val => setRevenueInput(val)}
+                onNumberChange={val => {
+                  setRevenueManuallyEdited(true);
+                  setRevenueInput(val);
+                }}
                 placeholder="0.00"
                 className="w-full px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl text-base font-bold text-stone-900 focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition-colors"
               />

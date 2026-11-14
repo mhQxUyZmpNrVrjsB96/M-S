@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
 import { MaintenanceRecord, MaintenanceType } from '../types';
-import { formatEuro } from '../utils/vendingUtils';
+import { formatEuro, parseEuro, oggiLocale } from '../utils/vendingUtils';
 
 export const MaintenanceManager: React.FC = () => {
   const { machines, maintenances, addMaintenance, deleteMaintenance } = useVending();
@@ -33,7 +33,7 @@ export const MaintenanceManager: React.FC = () => {
   const [note, setNote] = useState('');
   const [componentName, setComponentName] = useState('');
   const [cost, setCost] = useState('');
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(() => oggiLocale());
 
   // Filtro visualizzazione storico
   const [filterMachineId, setFilterMachineId] = useState<string>('all');
@@ -82,7 +82,7 @@ export const MaintenanceManager: React.FC = () => {
     setNote('');
     setComponentName('');
     setCost('');
-    setDate(new Date().toISOString().slice(0, 10));
+    setDate(oggiLocale());
     setIsModalOpen(true);
   };
 
@@ -100,12 +100,12 @@ export const MaintenanceManager: React.FC = () => {
         machineId: selectedMachineId,
         machineName,
         type: 'manutenzione',
-        date: date || new Date().toISOString().slice(0, 10),
+        date: date || oggiLocale(),
         note: note.trim(),
       });
     } else {
       // Sostituzione componente: richiede data e costo
-      const parsedCost = parseFloat(cost.replace(',', '.'));
+      const parsedCost = parseEuro(cost);
       if (isNaN(parsedCost) || parsedCost < 0) {
         alert('Inserisci un costo valido per il componente sostituito.');
         return;
@@ -643,9 +643,8 @@ export const MaintenanceManager: React.FC = () => {
                         Costo Componente (€) *
                       </label>
                       <input
-                        type="number"
-                        step="0.01"
-                        min="0"
+                        type="text"
+                        inputMode="decimal"
                         value={cost}
                         onChange={e => setCost(e.target.value)}
                         placeholder="0.00"

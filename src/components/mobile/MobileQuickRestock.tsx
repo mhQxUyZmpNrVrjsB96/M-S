@@ -104,7 +104,8 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
     setItemCounts(initial);
     setCashWithdrawn(activeMachine.cashBalance || 0);
     setIsSaved(false);
-  }, [activeMachine]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMachine?.id]);
 
   // Calcola quante scorte a magazzino sono libere per uno slot specifico
   const getSlotAvailableWarehouse = useCallback((slotId: string, currentItemCounts: Record<string, any>) => {
@@ -141,14 +142,15 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
       // Venduti = PreviousStock - Counted - Removed (i pezzi tolti per scadenza o reso non sono vendite!)
       const sold = Math.max(0, previousStock - state.counted - removed);
       const newStock = Math.min(slot.capacity, state.counted + state.added);
-      const revenue = sold * state.price;
+      const oldPrice = slot.salePrice;
+      const revenue = Number((sold * oldPrice).toFixed(2));
 
       const activeCostInfo = getSlotActiveCost(slot, product, purchases);
       const fallbackCost = activeCostInfo.unitCost || (product?.unitCost && product.unitCost > 0 ? product.unitCost : 0.50);
       const slotFifo = consumeSlotFifo(slot, sold, fallbackCost);
       const costOfSold = slotFifo.costOfSold;
       const unitCostOfSold = sold > 0 ? slotFifo.avgUnitCost : fallbackCost;
-      const profit = Math.max(0, revenue - costOfSold);
+      const profit = Number((revenue - costOfSold).toFixed(2));
       const marginPct = revenue > 0 ? (profit / revenue) * 100 : 0;
 
       const loadPlan = calculateFifoLoadPlan(slot.productId, state.added, purchases, fallbackCost);
@@ -261,25 +263,32 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
     if (!slot) return;
     const maxAllowed = Math.max(slot.capacity, slot.lastRestockStock ?? slot.capacity, 50);
     const clamped = Math.max(0, Math.min(maxAllowed, val));
+    const prevStock = typeof slot.lastRestockStock === 'number' ? slot.lastRestockStock : slot.currentStock;
+    const maxRemovable = Math.max(0, prevStock - clamped);
     setItemCounts(prev => {
       const current = prev[slotId] || { counted: slot.currentStock, removed: 0, returnRemovedToWarehouse: false, added: 0, price: slot.salePrice };
       const maxAdd = Math.max(0, slot.capacity - clamped);
       const newAdded = Math.min(current.added, maxAdd);
+      const newRemoved = Math.min(current.removed || 0, maxRemovable);
       return {
         ...prev,
-        [slotId]: { ...current, counted: clamped, added: newAdded },
+        [slotId]: { ...current, counted: clamped, added: newAdded, removed: newRemoved },
       };
     });
   };
 
   const setRemoved = (slotId: string, val: number, returnToWh?: boolean) => {
+    const slot = activeMachine?.slots.find(s => s.id === slotId);
+    const prevStock = typeof slot?.lastRestockStock === 'number' ? slot.lastRestockStock : (slot?.currentStock || 0);
     setItemCounts(prev => {
-      const current = prev[slotId] || { counted: 0, removed: 0, returnRemovedToWarehouse: false, added: 0, price: 1 };
+      const current = prev[slotId] || { counted: slot?.currentStock || 0, removed: 0, returnRemovedToWarehouse: false, added: 0, price: slot?.salePrice || 1 };
+      const maxRemovable = Math.max(0, prevStock - current.counted);
+      const clampedRemoved = Math.max(0, Math.min(val, maxRemovable));
       return {
         ...prev,
         [slotId]: {
           ...current,
-          removed: Math.max(0, val),
+          removed: clampedRemoved,
           returnRemovedToWarehouse: returnToWh !== undefined ? returnToWh : current.returnRemovedToWarehouse,
         }
       };
@@ -400,7 +409,7 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
       addedStock: r.added,
       newStock: r.newStock,
       addedCost: r.loadCost,
-      addedUnitCost: r.added > 0 ? Number((r.loadCost / r.added).toFixed(2)) : 0,
+      addedUnitCost: r.added > 0 ? Number((r.loadCost / r.added).toFixed(4)) : 0,
       marginPct: r.marginPct,
     }));
 
@@ -416,6 +425,19 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
       cashCollected: typeof cashWithdrawn === 'number' ? cashWithdrawn : 0,
       operatorNotes: operatorNotes || 'Rifornimento rapido da smartphone',
     });
+
+    const resetAfterSave: typeof itemCounts = {};
+    rowData.forEach(r => {
+      resetAfterSave[r.slotId] = {
+        counted: r.newStock,
+        removed: 0,
+        returnRemovedToWarehouse: false,
+        added: 0,
+        price: r.price,
+        showRemovedInput: false,
+      };
+    });
+    setItemCounts(resetAfterSave);
 
     const now = new Date().toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     setSavedTimeNotice(now);
@@ -802,6 +824,7 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
                                 <input
                                   type="number"
                                   min={0}
+                                  max={Math.max(0, row.previousStock - row.counted)}
                                   value={row.removed}
                                   onChange={e => setRemoved(row.slotId, parseInt(e.target.value) || 0)}
                                   className="w-12 h-7 text-center font-bold text-white bg-stone-900 border border-rose-500/60 rounded-lg text-xs"

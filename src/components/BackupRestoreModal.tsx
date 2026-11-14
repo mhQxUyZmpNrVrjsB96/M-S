@@ -49,7 +49,9 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
     deleteCheckpoint,
     canUndo, 
     undoLastAction,
-    lastActionName 
+    lastActionName,
+    storageSaveError,
+    lastSaveSucceeded
   } = useVending();
 
   const [activeTab, setActiveTab] = useState<'save' | 'restore'>(initialTab);
@@ -304,10 +306,17 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
 
                   <div className="hidden sm:block text-right shrink-0">
                     <span className="text-3xs text-stone-400 block">Stato Protezione:</span>
-                    <span className="text-2xs font-bold text-emerald-400 flex items-center gap-1 justify-end">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                      Dati al Sicuro
-                    </span>
+                    {lastSaveSucceeded && !storageSaveError ? (
+                      <span className="text-2xs font-bold text-emerald-400 flex items-center gap-1 justify-end">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                        Dati al Sicuro
+                      </span>
+                    ) : (
+                      <span className="text-2xs font-bold text-rose-400 flex items-center gap-1 justify-end">
+                        <span className="w-2 h-2 rounded-full bg-rose-500" />
+                        Salvataggio non riuscito
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -372,7 +381,7 @@ export const BackupRestoreModal: React.FC<BackupRestoreModalProps> = ({
                   <div>
                     <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
                       <Clock className="w-4 h-4 text-amber-400" />
-                      Punti di Salvataggio Recenti ({checkpoints.length}/15)
+                      Punti di Salvataggio Recenti ({checkpoints.length}/3)
                     </h4>
                     <p className="text-3xs text-stone-400">
                       Include sia i tuoi salvataggi manuali che gli auto-salvataggi automatici ad ogni Carica Rapida.

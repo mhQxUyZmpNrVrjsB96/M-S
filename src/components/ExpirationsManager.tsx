@@ -29,7 +29,7 @@ interface ExpirationsManagerProps {
 type ExpiryFilter = 'all' | 'warning' | 'expired' | 'ok' | 'finished' | 'no_date';
 
 export const ExpirationsManager: React.FC<ExpirationsManagerProps> = ({ onNavigateToPurchases }) => {
-  const { purchases, products, updateBatchExpiry, toggleBatchFinished } = useVending();
+  const { purchases, products, machines, updateBatchExpiry, toggleBatchFinished } = useVending();
   const [filter, setFilter] = useState<ExpiryFilter>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'urgency' | 'product' | 'remaining'>('urgency');
@@ -39,21 +39,21 @@ export const ExpirationsManager: React.FC<ExpirationsManagerProps> = ({ onNaviga
   const [editExpiryDate, setEditExpiryDate] = useState('');
   const [editNotes, setEditNotes] = useState('');
 
-  // Calcolo riepilogo con allarmi a 2 settimane (14 giorni)
-  const summary = useMemo(() => getExpirySummary(purchases), [purchases]);
+  // Calcolo riepilogo con allarmi a 2 settimane (14 giorni) su magazzino + spirali nei distributori
+  const summary = useMemo(() => getExpirySummary(purchases, machines, products), [purchases, machines, products]);
 
-  // Lista elaborata dei lotti
+  // Lista elaborata dei lotti (magazzino + eventuali lotti presenti solo nelle spirali)
   const processedBatches = useMemo(() => {
-    return purchases.map(b => {
-      const info = getBatchExpiryInfo(b);
-      const product = products.find(p => p.id === b.productId);
+    return summary.items.map(info => {
+      const batch = purchases.find(b => b.id === info.batchId);
+      const product = products.find(p => p.id === info.productId);
       return {
         ...info,
-        batch: b,
+        batch,
         product,
       };
     });
-  }, [purchases, products]);
+  }, [summary.items, purchases, products]);
 
   // Filtraggio
   const filteredBatches = useMemo(() => {
@@ -72,7 +72,13 @@ export const ExpirationsManager: React.FC<ExpirationsManagerProps> = ({ onNaviga
         const matchBatch = item.batchNumber.toLowerCase().includes(q);
         const matchSupplier = item.supplier.toLowerCase().includes(q);
         const matchNotes = (item.notes || '').toLowerCase().includes(q);
-        return matchProduct || matchBatch || matchSupplier || matchNotes;
+        const matchMachine = item.machineLocations.some(
+          loc =>
+            loc.machineCode.toLowerCase().includes(q) ||
+            loc.machineName.toLowerCase().includes(q) ||
+            loc.slotLabel.toLowerCase().includes(q)
+        );
+        return matchProduct || matchBatch || matchSupplier || matchNotes || matchMachine;
       }
 
       return true;
@@ -292,7 +298,7 @@ export const ExpirationsManager: React.FC<ExpirationsManagerProps> = ({ onNaviga
                 : 'text-stone-400 hover:text-white hover:bg-stone-800'
             }`}
           >
-            Tutti ({purchases.length})
+            Tutti ({summary.totalBatches})
           </button>
 
           <button
@@ -441,7 +447,12 @@ export const ExpirationsManager: React.FC<ExpirationsManagerProps> = ({ onNaviga
                         {item.productName}
                       </h3>
                       <p className="text-2xs text-stone-400">
-                        Fornitore: <strong className="text-stone-300">{item.supplier}</strong> • Costo ivato: <strong className="text-emerald-400">{formatEuro(item.batch.unitCostWithVat)}</strong>
+                        Fornitore: <strong className="text-stone-300">{item.supplier}</strong>
+                        {item.batch && (
+                          <>
+                            {' '}• Costo ivato: <strong className="text-emerald-400">{formatEuro(item.batch.unitCostWithVat)}</strong>
+                          </>
+                        )}
                       </p>
                     </div>
                   </div>
@@ -489,16 +500,22 @@ export const ExpirationsManager: React.FC<ExpirationsManagerProps> = ({ onNaviga
                     </div>
                   </div>
 
-                  {/* GIACENZA E CONSUMO DEL LOTTO */}
+                  {/* GIACENZA E CONSUMO DEL LOTTO (MAGAZZINO + DISTRIBUTORI) */}
                   <div className="mt-3 space-y-1.5">
-                    <div className="flex justify-between text-2xs">
-                      <span className="text-stone-400">Giacenza magazzino / carico:</span>
-                      <span className="font-bold text-white">
+                    <div className="flex justify-between text-2xs gap-2">
+                      <span className="text-stone-400">Giacenza magazzino + distributori:</span>
+                      <span className="font-bold text-white text-right">
                         {isFinished ? (
-                          <span className="text-stone-400 font-mono">0 pz (Tutto venduto / caricato)</span>
+                          <span className="text-stone-400 font-mono">0 pz (Tutto venduto)</span>
                         ) : (
                           <span className="text-emerald-400 font-mono">
-                            {item.remainingUnits} pz rimanenti <span className="text-stone-500 font-normal">/ {item.totalUnits} iniziali</span>
+                            {item.remainingUnits} pz totali{' '}
+                            <span className="text-stone-400 font-normal">
+                              ({item.warehouseRemainingUnits} mag. + {item.machineUnits} distr.)
+                            </span>
+                            {!item.isMachineOnly && (
+                              <span className="text-stone-500 font-normal"> / {item.totalUnits} iniz.</span>
+                            )}
                           </span>
                         )}
                       </span>
@@ -518,10 +535,35 @@ export const ExpirationsManager: React.FC<ExpirationsManagerProps> = ({ onNaviga
                       />
                     </div>
                     <div className="flex justify-between text-3xs text-stone-500">
-                      <span>Caricati/Venduti: {item.usedUnits} pz ({Math.round(item.usagePct)}%)</span>
-                      <span>{isFinished ? 'Lotto Esaurito' : 'In rotazione'}</span>
+                      <span>Venduti: {item.usedUnits} pz ({Math.round(item.usagePct)}%)</span>
+                      <span>
+                        {isFinished
+                          ? 'Lotto Esaurito'
+                          : item.machineUnits > 0 && item.warehouseRemainingUnits === 0
+                            ? 'Tutto nei distributori'
+                            : 'In rotazione'}
+                      </span>
                     </div>
                   </div>
+
+                  {/* UBICAZIONE NEI DISTRIBUTORI E SPIRALI */}
+                  {item.machineLocations.length > 0 && (
+                    <div className="mt-2.5 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-1.5">
+                      <span className="text-3xs font-bold uppercase tracking-wider text-amber-300 block">
+                        Nei distributori ({item.machineUnits} pz):
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {item.machineLocations.map(loc => (
+                          <span
+                            key={`${loc.machineId}-${loc.slotId}`}
+                            className="inline-flex items-center px-2 py-0.5 rounded-md text-3xs font-mono font-bold bg-stone-950/80 text-amber-200 border border-amber-500/40"
+                          >
+                            {loc.machineCode} ({loc.machineName}) • {loc.slotLabel}: {loc.units} pz
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* NOTE LOTTO E ORIGINE SCADENZA */}
                   {item.notes && (
@@ -534,37 +576,51 @@ export const ExpirationsManager: React.FC<ExpirationsManagerProps> = ({ onNaviga
 
                 {/* AZIONI RAPIDE DEL LOTTO */}
                 <div className="mt-4 pt-3 border-t border-stone-800/80 flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleOpenEdit(item.batchId, item.expiryDate, item.notes)}
-                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-200 text-2xs font-bold transition-colors cursor-pointer"
-                  >
-                    <Edit3 className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Modifica Scadenza / Note</span>
-                  </button>
+                  {item.batch ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEdit(item.batchId, item.expiryDate, item.notes)}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-200 text-2xs font-bold transition-colors cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Modifica Scadenza / Note</span>
+                      </button>
 
-                  <button
-                    type="button"
-                    onClick={() => toggleBatchFinished(item.batchId)}
-                    title={isFinished ? "Riapri lotto per calcolare rimanenze" : "Segna come finito: non genera allarmi ma resta in elenco"}
-                    className={`flex items-center space-x-1 px-3 py-1.5 rounded-xl text-2xs font-bold border transition-colors cursor-pointer ${
-                      isFinished
-                        ? 'bg-stone-900 border-stone-700 text-stone-300 hover:text-white'
-                        : 'bg-stone-950 hover:bg-stone-850 border-stone-800 text-stone-400 hover:text-amber-300'
-                    }`}
-                  >
-                    {isFinished ? (
-                      <>
-                        <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
-                        <span>Riapri Lotto</span>
-                      </>
-                    ) : (
-                      <>
-                        <PackageCheck className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Segna come Finito</span>
-                      </>
-                    )}
-                  </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleBatchFinished(item.batchId)}
+                        title={
+                          isFinished
+                            ? "Riapri lotto per calcolare rimanenze"
+                            : item.machineUnits > 0
+                              ? "Azzera giacenza in magazzino (i pezzi nelle spirali restano monitorati)"
+                              : "Segna come finito: non genera allarmi ma resta in elenco"
+                        }
+                        className={`flex items-center space-x-1 px-3 py-1.5 rounded-xl text-2xs font-bold border transition-colors cursor-pointer ${
+                          isFinished
+                            ? 'bg-stone-900 border-stone-700 text-stone-300 hover:text-white'
+                            : 'bg-stone-950 hover:bg-stone-850 border-stone-800 text-stone-400 hover:text-amber-300'
+                        }`}
+                      >
+                        {isFinished ? (
+                          <>
+                            <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Riapri Lotto</span>
+                          </>
+                        ) : (
+                          <>
+                            <PackageCheck className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>{item.warehouseRemainingUnits > 0 ? 'Azzera Magazzino' : 'Segna come Finito'}</span>
+                          </>
+                        )}
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-3xs text-stone-400 italic">
+                      Lotto caricato direttamente in spirale (gestito dal distributore).
+                    </span>
+                  )}
                 </div>
               </div>
             );

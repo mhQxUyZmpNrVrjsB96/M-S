@@ -1,4 +1,5 @@
 import { ParsedInvoiceData } from '../types';
+import { oggiLocale } from './vendingUtils';
 
 /**
  * Dati di esempio realistici di una fattura fornitore per distributori automatici (Grossista Vending S.r.l.)
@@ -7,8 +8,8 @@ import { ParsedInvoiceData } from '../types';
 export const SAMPLE_VENDING_INVOICE_DATA: ParsedInvoiceData = {
   supplierName: 'Grossista Vending Italia S.r.l.',
   invoiceNumber: 'FT-2026/0492',
-  invoiceDate: new Date().toISOString().slice(0, 10),
-  dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+  invoiceDate: oggiLocale(),
+  dueDate: oggiLocale(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)),
   paymentMethod: 'Bonifico Bancario 30gg d.f.',
   paymentStatus: 'da_pagare',
   taxRate: 22,

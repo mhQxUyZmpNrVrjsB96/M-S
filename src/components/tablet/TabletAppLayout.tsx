@@ -101,6 +101,7 @@ export const TabletAppLayout: React.FC<TabletAppLayoutProps> = ({
     saveAllDataNow,
     purchases,
     products,
+    machines,
     checkpoints,
     restoreCheckpoint,
     supabaseStatus
@@ -133,8 +134,9 @@ export const TabletAppLayout: React.FC<TabletAppLayoutProps> = ({
     };
   }, []);
 
-  const expirySummary = getExpirySummary(purchases);
+  const expirySummary = getExpirySummary(purchases, machines, products);
   const warehouseAlertCount = products.filter(p => {
+    if (p.archived) return false;
     const threshold = p.warehouseAlertThreshold ?? 8;
     return (p.warehouseStock || 0) <= threshold;
   }).length;

@@ -18,6 +18,7 @@ import {
 import { useVending } from '../context/VendingContext';
 import { formatEuro, formatPercent, CATEGORY_META } from '../utils/vendingUtils';
 import { Product, ProductCategory } from '../types';
+import { SmartNumberInput } from './common/SmartNumberInput';
 
 export const ProductCatalog: React.FC = () => {
   const { products, purchases, updateProduct, addProduct, deleteProduct } = useVending();
@@ -30,6 +31,8 @@ export const ProductCatalog: React.FC = () => {
   const [editPrice, setEditPrice] = useState<number>(0);
   const [editCost, setEditCost] = useState<number>(0);
   const [editName, setEditName] = useState<string>('');
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const [catalogNotice, setCatalogNotice] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
   // New product modal state
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -43,14 +46,16 @@ export const ProductCatalog: React.FC = () => {
   const [newGramsPerDose, setNewGramsPerDose] = useState<number>(7.0);
   const [newPackageGrams, setNewPackageGrams] = useState<number>(1000);
 
+  const activeProducts = useMemo(() => products.filter(p => !p.archived), [products]);
+
   const filteredProducts = useMemo(() => {
-    return products.filter(p => {
+    return activeProducts.filter(p => {
       const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         (p.description && p.description.toLowerCase().includes(searchQuery.toLowerCase()));
       const matchesCategory = selectedCategory === 'all' || p.category === selectedCategory;
       return matchesSearch && matchesCategory;
     });
-  }, [products, searchQuery, selectedCategory]);
+  }, [activeProducts, searchQuery, selectedCategory]);
 
   const startEdit = (p: Product) => {
     setEditingProductId(p.id);
@@ -132,7 +137,7 @@ export const ProductCatalog: React.FC = () => {
             onChange={(e) => setSelectedCategory(e.target.value)}
             className="px-3 py-2 text-sm bg-stone-50 border border-stone-200 rounded-lg text-stone-700 focus:bg-white focus:outline-hidden"
           >
-            <option value="all">Tutte le Categorie ({products.length})</option>
+            <option value="all">Tutte le Categorie ({activeProducts.length})</option>
             <option value="caffe_calde">Caffè & Bevande Calde</option>
             <option value="bevande_fredde">Bevande Fredde</option>
             <option value="snack_dolci">Snack Dolci</option>
@@ -151,6 +156,25 @@ export const ProductCatalog: React.FC = () => {
           <span>Nuovo Prodotto</span>
         </button>
       </div>
+
+      {catalogNotice && (
+        <div
+          className={`px-4 py-3 rounded-xl border text-xs font-semibold flex items-center justify-between gap-3 ${
+            catalogNotice.type === 'error'
+              ? 'bg-rose-50 border-rose-300 text-rose-900'
+              : 'bg-emerald-50 border-emerald-300 text-emerald-900'
+          }`}
+        >
+          <span>{catalogNotice.text}</span>
+          <button
+            type="button"
+            onClick={() => setCatalogNotice(null)}
+            className="text-stone-500 hover:text-stone-800 font-bold cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Products Table Card */}
       <div className="bg-white rounded-xl border border-stone-200 shadow-2xs overflow-hidden">
@@ -262,12 +286,12 @@ export const ProductCatalog: React.FC = () => {
                       {isEditing ? (
                         <div className="inline-flex items-center">
                           <span className="text-xs text-stone-400 mr-1">€</span>
-                          <input
-                            type="number"
-                            step="0.05"
-                            min="0.01"
+                          <SmartNumberInput
+                            allowDecimals={true}
+                            min={0.01}
+                            defaultValueIfEmpty={0.01}
                             value={editCost}
-                            onChange={(e) => setEditCost(parseFloat(e.target.value) || 0)}
+                            onChange={(val) => setEditCost(Number(val))}
                             className="w-16 px-1.5 py-1 text-right text-xs font-semibold border border-stone-300 rounded"
                           />
                         </div>
@@ -283,12 +307,12 @@ export const ProductCatalog: React.FC = () => {
                       {isEditing ? (
                         <div className="inline-flex items-center">
                           <span className="text-xs text-stone-400 mr-1">€</span>
-                          <input
-                            type="number"
-                            step="0.10"
-                            min="0.10"
+                          <SmartNumberInput
+                            allowDecimals={true}
+                            min={0.1}
+                            defaultValueIfEmpty={0.1}
                             value={editPrice}
-                            onChange={(e) => setEditPrice(parseFloat(e.target.value) || 0)}
+                            onChange={(val) => setEditPrice(Number(val))}
                             className="w-16 px-1.5 py-1 text-right text-xs font-bold text-stone-900 border border-emerald-400 rounded focus:ring-1 focus:ring-emerald-500"
                           />
                         </div>
@@ -332,6 +356,30 @@ export const ProductCatalog: React.FC = () => {
                             <X className="w-3.5 h-3.5" />
                           </button>
                         </div>
+                      ) : confirmingDeleteId === product.id ? (
+                        <div className="flex items-center justify-center space-x-1">
+                          <button
+                            type="button"
+                            onClick={() => setConfirmingDeleteId(null)}
+                            className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 text-2xs font-semibold cursor-pointer"
+                          >
+                            Annulla
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const res = deleteProduct(product.id);
+                              setConfirmingDeleteId(null);
+                              setCatalogNotice({
+                                type: res.success ? 'success' : 'error',
+                                text: res.message || (res.success ? 'Articolo archiviato.' : 'Impossibile eliminare.'),
+                              });
+                            }}
+                            className="px-2 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-2xs font-bold cursor-pointer"
+                          >
+                            Archivia
+                          </button>
+                        </div>
                       ) : (
                         <div className="flex items-center justify-center space-x-1">
                           <button
@@ -342,13 +390,9 @@ export const ProductCatalog: React.FC = () => {
                             <Edit3 className="w-3.5 h-3.5" />
                           </button>
                           <button
-                            onClick={() => {
-                              if (window.confirm(`Eliminare definitivamente "${product.name}"?`)) {
-                                deleteProduct(product.id);
-                              }
-                            }}
-                            className="p-1.5 rounded-md text-stone-300 hover:text-rose-600 hover:bg-rose-50 transition-colors"
-                            title="Elimina articolo"
+                            onClick={() => setConfirmingDeleteId(product.id)}
+                            className="p-1.5 rounded-md text-stone-300 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                            title="Archivia articolo"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -597,13 +641,13 @@ export const ProductCatalog: React.FC = () => {
                   <label className="block text-xs font-bold text-stone-700 mb-1">
                     {newUnit === 'g' || newUnit === 'grammi' ? 'Costo Acquisto / g (€ Ivato)' : 'Costo Acquisto (€ Ivato)'}
                   </label>
-                  <input
-                    type="number"
-                    step="0.005"
-                    min="0.001"
+                  <SmartNumberInput
+                    allowDecimals={true}
+                    min={0.001}
+                    defaultValueIfEmpty={0.01}
                     required
                     value={newCost}
-                    onChange={(e) => setNewCost(parseFloat(e.target.value) || 0)}
+                    onChange={(val) => setNewCost(Number(val))}
                     className="w-full px-3 py-2 border border-stone-300 rounded-lg text-stone-900"
                   />
                   <span className="text-3xs text-stone-400 mt-0.5 block">
@@ -612,13 +656,13 @@ export const ProductCatalog: React.FC = () => {
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-stone-700 mb-1">Prezzo Vendita (€ IVA compresa)</label>
-                  <input
-                    type="number"
-                    step="0.05"
-                    min="0.10"
+                  <SmartNumberInput
+                    allowDecimals={true}
+                    min={0.1}
+                    defaultValueIfEmpty={0.1}
                     required
                     value={newPrice}
-                    onChange={(e) => setNewPrice(parseFloat(e.target.value) || 0)}
+                    onChange={(val) => setNewPrice(Number(val))}
                     className="w-full px-3 py-2 border border-stone-300 rounded-lg text-stone-900 font-bold"
                   />
                   <span className="text-3xs text-stone-400 mt-0.5 block">Prezzo erogato al cliente (IVA compresa)</span>

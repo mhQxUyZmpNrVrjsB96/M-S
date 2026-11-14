@@ -24,6 +24,7 @@ import {
 import { useVending } from '../context/VendingContext';
 import { formatEuro, formatPercent } from '../utils/vendingUtils';
 import { FixedCost, FixedCostCategory } from '../types';
+import { SmartNumberInput } from './common/SmartNumberInput';
 
 const CATEGORY_ICONS: Record<FixedCostCategory, React.ReactNode> = {
   affitto: <Building2 className="w-4 h-4 text-rose-600" />,
@@ -168,36 +169,99 @@ export const FixedCostsManager: React.FC = () => {
     }, 0);
   }, [maintenances, calculationPeriod]);
 
-  // Normalizzazione Costi Fissi in base al periodo (es. Se annuale moltiplica i mensili per 12)
+  const earliestRestockDate = useMemo(() => {
+    if (!restockHistory || restockHistory.length === 0) return null;
+    let minTime = Infinity;
+    for (const s of restockHistory) {
+      const t = new Date(s.timestamp).getTime();
+      if (Number.isFinite(t) && t < minTime) minTime = t;
+    }
+    return Number.isFinite(minTime) ? new Date(minTime) : null;
+  }, [restockHistory]);
+
+  // Normalizzazione Costi Fissi in base al periodo effettivo, partendo da dateAdded (o dal primo rifornimento per 'all')
   const periodFixedCostsTotal = useMemo(() => {
+    const parseDateLocal = (raw?: string): Date | null => {
+      if (!raw) return null;
+      const ymd = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (ymd) {
+        return new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]), 12, 0, 0);
+      }
+      const d = new Date(raw);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    const now = new Date();
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+    const yearStart = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+    const firstRestockStart = earliestRestockDate
+      ? new Date(earliestRestockDate.getFullYear(), earliestRestockDate.getMonth(), earliestRestockDate.getDate(), 0, 0, 0, 0)
+      : null;
+
     return fixedCosts.reduce((acc, c) => {
       if (c.autoDeduction === false) return acc;
+
+      const addedDate = parseDateLocal(c.dateAdded) || now;
+
+      if (c.recurrence === 'una_tantum') {
+        const expenseDate = parseDateLocal(c.dueDate || c.dateAdded) || addedDate;
+        if (expenseDate.getTime() > todayEnd.getTime()) return acc;
+
+        let inPeriod = false;
+        if (calculationPeriod === 'month') {
+          inPeriod = expenseDate.getMonth() === now.getMonth() && expenseDate.getFullYear() === now.getFullYear();
+        } else if (calculationPeriod === '30days') {
+          inPeriod = expenseDate.getTime() >= thirtyDaysAgo.getTime();
+        } else if (calculationPeriod === 'year') {
+          inPeriod = expenseDate.getFullYear() === now.getFullYear();
+        } else {
+          // 'all': dal primo rifornimento (o dateAdded se più recente o assenza rifornimenti) fino a oggi
+          const allStart = firstRestockStart && firstRestockStart.getTime() > addedDate.getTime()
+            ? firstRestockStart
+            : new Date(addedDate.getFullYear(), addedDate.getMonth(), addedDate.getDate(), 0, 0, 0, 0);
+          inPeriod = expenseDate.getTime() >= allStart.getTime();
+        }
+        return inPeriod ? acc + c.amount : acc;
+      }
+
+      // Costi ricorrenti: non ancora iniziati rispetto a oggi
+      if (addedDate.getTime() > todayEnd.getTime()) return acc;
 
       let monthlyMultiplier = 1;
       if (c.recurrence === 'mensile') monthlyMultiplier = 1;
       else if (c.recurrence === 'bimestrale') monthlyMultiplier = 0.5;
       else if (c.recurrence === 'trimestrale') monthlyMultiplier = 1 / 3;
       else if (c.recurrence === 'annuale') monthlyMultiplier = 1 / 12;
-      else if (c.recurrence === 'una_tantum') monthlyMultiplier = 1; // considerata nel periodo
 
-      if (calculationPeriod === 'year') {
-        // Su base annuale: mensile * 12, annuale * 1, ecc.
-        const yearlyAmount = c.recurrence === 'annuale' ? c.amount : monthlyMultiplier * c.amount * 12;
-        return acc + yearlyAmount;
+      let effectiveMonths = 0;
+      if (calculationPeriod === 'month') {
+        effectiveMonths = 1;
+      } else if (calculationPeriod === '30days') {
+        effectiveMonths = 1;
+      } else if (calculationPeriod === 'year') {
+        const effectiveStart = addedDate.getTime() > yearStart.getTime() ? addedDate : yearStart;
+        const diffDays = Math.max(0, (todayEnd.getTime() - effectiveStart.getTime()) / (1000 * 3600 * 24));
+        effectiveMonths = Math.max(1, Math.round(diffDays / 30.4375));
       } else {
-        // Su base mensile (o 30gg o mese corrente)
-        const monthlyAmount = monthlyMultiplier * c.amount;
-        return acc + monthlyAmount;
+        // 'all': dal primo rifornimento registrato (o da dateAdded se è più recente) fino a oggi
+        const effectiveStart = firstRestockStart && firstRestockStart.getTime() > addedDate.getTime()
+          ? firstRestockStart
+          : addedDate;
+        const diffDays = Math.max(0, (todayEnd.getTime() - effectiveStart.getTime()) / (1000 * 3600 * 24));
+        effectiveMonths = Math.max(1, Math.round(diffDays / 30.4375));
       }
+
+      return acc + monthlyMultiplier * c.amount * effectiveMonths;
     }, 0);
-  }, [fixedCosts, calculationPeriod]);
+  }, [fixedCosts, calculationPeriod, earliestRestockDate]);
 
   // Conto Economico Dettagliato del Negozio H24
   const financialStatement = useMemo(() => {
     // 1. Incassi Lordi dalle vendite
     const totalRevenue = filteredRestockSessions.reduce((sum, s) => sum + (s.totalRevenue || 0), 0);
-    // 2. Costo Merci Vendute (COGS su lotti FIFO)
-    const totalCogs = filteredRestockSessions.reduce((sum, s) => sum + (s.totalCost || 0), 0);
+    // 2. Costo Merci Vendute (COGS su lotti FIFO) + eventuali perdite per scadenze/scarti
+    const totalCogs = filteredRestockSessions.reduce((sum, s) => sum + (s.totalCost || 0) + (s.totalRemovedLoss || 0), 0);
     // 3. Margine Commerciale Lordo
     const grossCommercialProfit = totalRevenue - totalCogs;
     // 4. Manutenzioni e ricambi
@@ -593,14 +657,15 @@ export const FixedCostsManager: React.FC = () => {
                   <label className="block text-xs font-semibold text-stone-700 mb-1">
                     Importo Costo (€) *
                   </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0.01"
+                  <SmartNumberInput
+                    allowDecimals={true}
+                    allowEmpty={true}
+                    defaultValueIfEmpty=""
+                    min={0.01}
                     required
                     placeholder="0.00"
                     value={amount}
-                    onChange={(e) => setAmount(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    onChange={(val) => setAmount(val === '' ? '' : Number(val))}
                     className="w-full px-3 py-2 text-xs font-mono font-bold border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
                   />
                 </div>

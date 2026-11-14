@@ -10,25 +10,6 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-// Middleware CORS completo per gestire richieste da iframe e cross-origin
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  } else {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  }
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-  res.setHeader("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Range");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range");
-
-  if (req.method === "OPTIONS") {
-    return res.status(204).end();
-  }
-  next();
-});
-
 // Body parser con limite aumentato per PDF e scansioni ad alta risoluzione
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -412,10 +393,18 @@ async function startServer() {
   // Vite middleware in sviluppo, file statici in produzione
   if (process.env.NODE_ENV !== "production") {
     const isHmrDisabled = process.env.DISABLE_HMR === "true";
+    const isHttpsProxy = process.env.APP_URL?.startsWith("https");
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: isHmrDisabled ? false : { server: httpServer },
+        allowedHosts: true,
+        ...(isHmrDisabled ? { ws: false as const } : {}),
+        hmr: isHmrDisabled
+          ? false
+          : {
+              server: httpServer,
+              ...(isHttpsProxy ? { clientPort: 443, protocol: "wss" } : {}),
+            },
       },
       appType: "spa",
     });

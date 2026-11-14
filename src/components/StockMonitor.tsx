@@ -129,17 +129,20 @@ export const StockMonitor: React.FC<StockMonitorProps> = ({ onNavigateToWarehous
     e.preventDefault();
     if (!newName.trim()) return;
 
-    // Crea slot predefiniti in base al tipo
-    const defaultSlots = products.slice(0, 6).map((p, idx) => ({
-      id: `slot-${idx + 1}`,
-      label: newType === 'caffe_calde' ? `Canestro ${idx + 1}` : `Spirale A${idx + 1}`,
-      productId: p.id,
-      capacity: newType === 'caffe_calde' ? 100 : 20,
-      currentStock: newType === 'caffe_calde' ? 100 : 20,
-      alertThreshold: newType === 'caffe_calde' ? 20 : 5,
-      salePrice: p.defaultPrice,
-      lastRestockStock: newType === 'caffe_calde' ? 100 : 20,
-    }));
+    // Crea slot predefiniti in base al tipo con giacenza iniziale 0 (si riempiono al primo rifornimento)
+    const defaultSlots = products
+      .filter(p => !p.archived)
+      .slice(0, 6)
+      .map((p, idx) => ({
+        id: `slot-${idx + 1}`,
+        label: newType === 'caffe_calde' ? `Canestro ${idx + 1}` : `Spirale A${idx + 1}`,
+        productId: p.id,
+        capacity: newType === 'caffe_calde' ? 100 : 20,
+        currentStock: 0,
+        alertThreshold: newType === 'caffe_calde' ? 20 : 5,
+        salePrice: p.defaultPrice,
+        lastRestockStock: 0,
+      }));
 
     addNewMachine({
       code: newCode,

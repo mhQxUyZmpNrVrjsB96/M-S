@@ -24,7 +24,8 @@ import {
   formatPercent, 
   CATEGORY_META, 
   exportSalesCSV,
-  formatBatchConsumptionSummary 
+  formatBatchConsumptionSummary,
+  oggiLocale
 } from '../utils/vendingUtils';
 import { ProductCategory, RestockSession } from '../types';
 
@@ -103,17 +104,19 @@ export const ProfitsDashboard: React.FC = () => {
   const metrics = useMemo(() => {
     let totalRevenue = 0;
     let totalCost = 0;
+    let totalRemovedLoss = 0;
     let totalSold = 0;
     let totalCashCollected = 0;
 
     for (const session of filteredSessions) {
       totalRevenue += session.totalRevenue;
       totalCost += session.totalCost;
+      totalRemovedLoss += (session.totalRemovedLoss || 0);
       totalSold += session.totalSold;
       totalCashCollected += (session.cashCollected || 0);
     }
 
-    const totalProfit = totalRevenue - totalCost;
+    const totalProfit = totalRevenue - totalCost - totalRemovedLoss;
     const marginPct = totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0;
     const avgPerRestock = filteredSessions.length > 0 ? totalRevenue / filteredSessions.length : 0;
 
@@ -206,7 +209,7 @@ export const ProfitsDashboard: React.FC = () => {
 
     // Raccogli dalle sessioni
     for (const s of filteredSessions) {
-      const dateKey = new Date(s.timestamp).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' });
+      const dateKey = new Date(s.timestamp).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: 'numeric' });
       const current = daysMap.get(dateKey) || { date: dateKey, revenue: 0, cost: 0, profit: 0, units: 0 };
       current.revenue += s.totalRevenue;
       current.cost += s.totalCost;
@@ -258,7 +261,7 @@ export const ProfitsDashboard: React.FC = () => {
       return;
     }
 
-    exportSalesCSV(`Report_Profitti_Vending_${dateFilter}_${new Date().toISOString().slice(0,10)}`, rows);
+    exportSalesCSV(`Report_Profitti_Vending_${dateFilter}_${oggiLocale()}`, rows);
   };
 
   return (
@@ -771,8 +774,13 @@ export const ProfitsDashboard: React.FC = () => {
                       </td>
                       <td className="py-3 px-4 text-right text-stone-500">
                         {formatEuro(session.totalCost)}
+                        {(session.totalRemovedLoss || 0) > 0 && (
+                          <span className="block text-3xs text-rose-600 font-semibold">
+                            scarti -{formatEuro(session.totalRemovedLoss)}
+                          </span>
+                        )}
                       </td>
-                      <td className="py-3 px-4 text-right font-bold text-emerald-600">
+                      <td className={`py-3 px-4 text-right font-bold ${session.totalProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
                         {formatEuro(session.totalProfit)}
                       </td>
                       <td className="py-3 px-4 text-stone-500 italic truncate max-w-xs">
@@ -859,6 +867,12 @@ export const ProfitsDashboard: React.FC = () => {
                                             {hasMultiLoad && (
                                               <div className="text-2xs text-blue-800 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 inline-block ml-1">
                                                 Caricati: {item.loadedAllocations!.map(a => `${a.quantity}pz (${formatEuro(a.unitCost)})`).join(' + ')}
+                                              </div>
+                                            )}
+
+                                            {(item.removedLoss || 0) > 0 && (
+                                              <div className="text-2xs text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200 inline-block ml-1 font-semibold">
+                                                Scaduti/scarti ({item.unitsRemoved} pz): perdita -{formatEuro(item.removedLoss)}
                                               </div>
                                             )}
                                           </div>

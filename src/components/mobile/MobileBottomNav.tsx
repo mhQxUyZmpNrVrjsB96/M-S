@@ -23,10 +23,11 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   onSelectTab,
   onOpenMoreMenu,
 }) => {
-  const { purchases, products } = useVending();
-  const expirySummary = useMemo(() => getExpirySummary(purchases), [purchases]);
+  const { purchases, products, machines } = useVending();
+  const expirySummary = useMemo(() => getExpirySummary(purchases, machines, products), [purchases, machines, products]);
   const warehouseAlertCount = useMemo(() => {
     return products.filter(p => {
+      if (p.archived) return false;
       const threshold = p.warehouseAlertThreshold ?? 8;
       return (p.warehouseStock || 0) <= threshold;
     }).length;

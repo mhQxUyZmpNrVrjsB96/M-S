@@ -10,6 +10,7 @@ import {
   RestockItemBatchConsumption 
 } from '../types';
 import { WAREHOUSE_DEPOT } from '../data/initialData';
+import { parseExpiryFromText } from './expiryUtils';
 
 export interface FifoAllocation {
   batchId: string;
@@ -19,6 +20,7 @@ export interface FifoAllocation {
   quantity: number;
   unitCost: number;
   totalCost: number;
+  expiryDate?: string;
 }
 
 export interface FifoLoadPlan {
@@ -34,6 +36,24 @@ export interface SlotFifoConsumptionResult {
   avgUnitCost: number;
   consumptions: RestockItemBatchConsumption[];
   remainingBatches: SlotLoadedBatch[];
+}
+
+export function roundUnitCost(val: number): number {
+  if (!Number.isFinite(val)) return 0;
+  return Math.round((val + Number.EPSILON) * 10000) / 10000;
+}
+
+export function costoUnitarioLotto(lotto?: PurchaseBatch | null): number {
+  if (!lotto) return 0;
+  const net = Number(lotto.unitCostNet) || 0;
+  const withVat = Number(lotto.unitCostWithVat) || 0;
+  if (lotto.costBasisUsed === 'ivato') {
+    return withVat > 0 ? withVat : net;
+  }
+  if (lotto.costBasisUsed === 'netto') {
+    return net > 0 ? net : withVat;
+  }
+  return withVat > 0 ? withVat : net;
 }
 
 /**
@@ -77,9 +97,7 @@ export function getSlotActiveCost(
 
   const activeWarehouseBatch = prodPurchases.find(p => p.remainingUnits > 0) || prodPurchases[0];
   if (activeWarehouseBatch) {
-    const cost = activeWarehouseBatch.unitCostWithVat > 0
-      ? activeWarehouseBatch.unitCostWithVat
-      : (activeWarehouseBatch.costBasisUsed === 'ivato' ? activeWarehouseBatch.unitCostWithVat : activeWarehouseBatch.unitCostNet);
+    const cost = costoUnitarioLotto(activeWarehouseBatch);
     return {
       unitCost: cost,
       batchNumber: activeWarehouseBatch.batchNumber,
@@ -128,7 +146,7 @@ export function calculateFifoLoadPlan(
   for (const b of activeBatches) {
     if (remaining <= 0) break;
     const take = Math.min(remaining, b.remainingUnits);
-    const unitCost = b.unitCostWithVat > 0 ? b.unitCostWithVat : (b.costBasisUsed === 'ivato' ? b.unitCostWithVat : b.unitCostNet);
+    const unitCost = costoUnitarioLotto(b);
     const lineCost = take * unitCost;
     totalCost += lineCost;
     allocations.push({
@@ -139,6 +157,7 @@ export function calculateFifoLoadPlan(
       quantity: take,
       unitCost,
       totalCost: Number(lineCost.toFixed(4)),
+      expiryDate: parseExpiryFromText(b.notes, b.expiryDate) || b.expiryDate || undefined,
     });
     remaining -= take;
   }
@@ -284,16 +303,25 @@ export function appendLoadedBatches(
   existingBatches: SlotLoadedBatch[],
   allocations: FifoAllocation[],
   fallbackCost: number = 0,
-  unallocatedUnits: number = 0
+  unallocatedUnits: number = 0,
+  purchases: PurchaseBatch[] = []
 ): SlotLoadedBatch[] {
   const result: SlotLoadedBatch[] = existingBatches.map(b => ({ ...b })).filter(b => b.units > 0);
 
   for (const alloc of allocations) {
     if (alloc.quantity <= 0) continue;
+    const matchedBatch = alloc.batchId ? purchases.find(p => p.id === alloc.batchId) : undefined;
+    const resolvedExpiry =
+      alloc.expiryDate ||
+      (matchedBatch ? parseExpiryFromText(matchedBatch.notes, matchedBatch.expiryDate) || matchedBatch.expiryDate : undefined);
+
     const last = result[result.length - 1];
     // Se l'ultimo lotto in coda è esattamente dello stesso acquisto e prezzo, aggrega le unità
     if (last && last.batchId === alloc.batchId && Math.abs(last.unitCost - alloc.unitCost) < 0.0001) {
       last.units += alloc.quantity;
+      if (!last.expiryDate && resolvedExpiry) {
+        last.expiryDate = resolvedExpiry;
+      }
     } else {
       result.push({
         batchId: alloc.batchId,
@@ -302,6 +330,7 @@ export function appendLoadedBatches(
         unitCost: alloc.unitCost,
         units: alloc.quantity,
         loadedAt: new Date().toISOString(),
+        expiryDate: resolvedExpiry,
       });
     }
   }
@@ -367,6 +396,37 @@ export const CATEGORY_META: Record<ProductCategory, { label: string; color: stri
     border: 'border-purple-200',
   },
 };
+
+export function parseEuro(testo: string | number): number {
+  if (typeof testo === 'number') {
+    return Number.isFinite(testo) ? testo : NaN;
+  }
+  if (!testo || typeof testo !== 'string') return NaN;
+  const cleaned = testo.replace(/€/g, '').replace(/\s+/g, '').trim();
+  if (!cleaned) return NaN;
+
+  let normalized = cleaned;
+  if (cleaned.includes(',')) {
+    // Formato con virgola decimale: rimuove eventuali punti delle migliaia e converte la virgola in punto
+    normalized = cleaned.replace(/\./g, '').replace(/,/g, '.');
+  } else if (/^[+-]?[1-9]\d{0,2}(\.\d{3})+$/.test(cleaned)) {
+    // Formato con soli punti delle migliaia (es. "1.234" o "12.345.678") senza parte decimale
+    normalized = cleaned.replace(/\./g, '');
+  } else if ((cleaned.match(/\./g) || []).length > 1) {
+    // Punti multipli delle migliaia (es. "1.234.567")
+    normalized = cleaned.replace(/\./g, '');
+  }
+
+  const parsed = parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+export function oggiLocale(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 export function formatEuro(amount?: number | null): string {
   const safe = typeof amount === 'number' && !isNaN(amount) ? amount : 0;

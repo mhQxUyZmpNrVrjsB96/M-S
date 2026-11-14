@@ -26,6 +26,7 @@ import {
   getSlotActiveCost
 } from '../utils/vendingUtils';
 import { RestockReviewModal } from './common/RestockReviewModal';
+import { SmartNumberInput } from './common/SmartNumberInput';
 
 interface RestockRowState {
   slotId: string;
@@ -34,6 +35,7 @@ interface RestockRowState {
   productName: string;
   category: string;
   capacity: number;
+  oldSalePrice: number;
   salePrice: number;
   unitCost: number;
   batchId?: string;
@@ -80,14 +82,9 @@ export const RestockModal: React.FC = () => {
     return machines.find(m => m.id === selectedMachineId) || machines[0];
   }, [machines, selectedMachineId]);
 
-  // Inizializza le righe con i dati correnti degli slot e dei lotti fornitore
+  // Inizializza le righe con i dati correnti degli slot solo all'apertura modale o al cambio distributore
   useEffect(() => {
-    if (!selectedMachine) return;
-
-    const remainingWarehouse: Record<string, number> = {};
-    products.forEach(p => {
-      remainingWarehouse[p.id] = Math.max(0, p.warehouseStock || 0);
-    });
+    if (!activeModalMachineId || !selectedMachine) return;
 
     const initialRows: RestockRowState[] = selectedMachine.slots.map(slot => {
       const prod = products.find(p => p.id === slot.productId);
@@ -106,6 +103,7 @@ export const RestockModal: React.FC = () => {
         productName: prod ? prod.name : 'Prodotto sconosciuto',
         category: prod ? prod.category : 'bevande_fredde',
         capacity: slot.capacity,
+        oldSalePrice: slot.salePrice,
         salePrice: slot.salePrice,
         unitCost: effectiveUnitCost,
         batchId: activeCostInfo.batchId,
@@ -124,7 +122,8 @@ export const RestockModal: React.FC = () => {
     setCashCollected(selectedMachine.cashBalance || 0);
     setOperatorNotes('');
     setIsSuccessFeedback(false);
-  }, [selectedMachine, products, purchases]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedMachine?.id, activeModalMachineId]);
 
   // Modifica valori di una riga
   const handleCountedChange = (slotId: string, val: number) => {
@@ -135,10 +134,13 @@ export const RestockModal: React.FC = () => {
         const clampedCounted = Math.max(0, Math.min(val, maxAllowed));
         const spaceInSlot = Math.max(0, r.capacity - clampedCounted);
         const newAdded = Math.min(r.addedStock, spaceInSlot);
+        const maxRemovable = Math.max(0, r.previousStock - clampedCounted);
+        const clampedRemoved = Math.min(r.unitsRemoved || 0, maxRemovable);
         return {
           ...r,
           countedRemaining: clampedCounted,
           addedStock: newAdded,
+          unitsRemoved: clampedRemoved,
         };
       });
     });
@@ -147,9 +149,11 @@ export const RestockModal: React.FC = () => {
   const handleRemovedChange = (slotId: string, val: number, returnToWh?: boolean) => {
     setRows(prev => prev.map(r => {
       if (r.slotId !== slotId) return r;
+      const maxRemovable = Math.max(0, r.previousStock - r.countedRemaining);
+      const clampedRemoved = Math.max(0, Math.min(val, maxRemovable));
       return {
         ...r,
-        unitsRemoved: Math.max(0, val),
+        unitsRemoved: clampedRemoved,
         returnToWarehouse: returnToWh !== undefined ? returnToWh : r.returnToWarehouse,
       };
     }));
@@ -202,7 +206,7 @@ export const RestockModal: React.FC = () => {
   // Modifica costo unitario o selezione lotto
   const handleCostChange = (slotId: string, val: number) => {
     setRows(prev =>
-      prev.map(r => (r.slotId === slotId ? { ...r, unitCost: Math.max(0.01, Number(val.toFixed(3))) } : r))
+      prev.map(r => (r.slotId === slotId ? { ...r, unitCost: Math.max(0.0001, Number(val.toFixed(4))) } : r))
     );
   };
 
@@ -237,7 +241,7 @@ export const RestockModal: React.FC = () => {
 
     for (const r of rows) {
       const sold = Math.max(0, r.previousStock - r.countedRemaining - (r.unitsRemoved || 0));
-      const rev = sold * r.salePrice;
+      const rev = Number((sold * r.oldSalePrice).toFixed(2));
       const slot = selectedMachine?.slots.find(s => s.id === r.slotId);
       const fifoConsumption = slot
         ? consumeSlotFifo(slot, sold, r.unitCost)
@@ -271,7 +275,7 @@ export const RestockModal: React.FC = () => {
 
     const items = rows.map(r => {
       const sold = Math.max(0, r.previousStock - r.countedRemaining - (r.unitsRemoved || 0));
-      const rev = Number((sold * r.salePrice).toFixed(2));
+      const rev = Number((sold * r.oldSalePrice).toFixed(2));
       const slot = selectedMachine.slots.find(s => s.id === r.slotId);
       const fifoConsumption = slot
         ? consumeSlotFifo(slot, sold, r.unitCost)
@@ -424,8 +428,8 @@ export const RestockModal: React.FC = () => {
               <tbody className="divide-y divide-stone-100">
                 {rows.map((row) => {
                   const slot = selectedMachine?.slots.find(s => s.id === row.slotId);
-                  const sold = Math.max(0, row.previousStock - row.countedRemaining);
-                  const lineRevenue = Number((sold * row.salePrice).toFixed(2));
+                  const sold = Math.max(0, row.previousStock - row.countedRemaining - (row.unitsRemoved || 0));
+                  const lineRevenue = Number((sold * row.oldSalePrice).toFixed(2));
                   const fifoConsumption = slot
                     ? consumeSlotFifo(slot, sold, row.unitCost)
                     : { costOfSold: Number((sold * row.unitCost).toFixed(2)), avgUnitCost: row.unitCost, consumptions: [], remainingBatches: [] };
@@ -476,12 +480,12 @@ export const RestockModal: React.FC = () => {
                       <td className="py-3 px-2 text-center bg-stone-50/50">
                         <div className="inline-flex items-center justify-center">
                           <span className="text-2xs text-stone-400 mr-0.5">€</span>
-                          <input
-                            type="number"
-                            step="0.05"
-                            min="0.01"
-                            value={sold > 0 && fifoConsumption.consumptions.length > 1 ? Number(fifoConsumption.avgUnitCost.toFixed(3)) : row.unitCost}
-                            onChange={(e) => handleCostChange(row.slotId, parseFloat(e.target.value) || 0)}
+                          <SmartNumberInput
+                            allowDecimals={true}
+                            min={0.0001}
+                            defaultValueIfEmpty={0.01}
+                            value={sold > 0 && fifoConsumption.consumptions.length > 1 ? Number(fifoConsumption.avgUnitCost.toFixed(4)) : row.unitCost}
+                            onChange={(val) => handleCostChange(row.slotId, Number(val))}
                             className="w-14 px-1 py-0.5 text-center text-xs font-mono font-bold text-stone-700 bg-white border border-stone-200 rounded"
                             title="Costo di acquisto unitario del lotto"
                           />
@@ -497,12 +501,12 @@ export const RestockModal: React.FC = () => {
                       <td className="py-3 px-2 text-center">
                         <div className="inline-flex items-center">
                           <span className="text-xs text-stone-400 mr-1">€</span>
-                          <input
-                            type="number"
-                            step="0.10"
-                            min="0.10"
+                          <SmartNumberInput
+                            allowDecimals={true}
+                            min={0.1}
+                            defaultValueIfEmpty={0.1}
                             value={row.salePrice}
-                            onChange={(e) => handlePriceChange(row.slotId, parseFloat(e.target.value) || 0)}
+                            onChange={(val) => handlePriceChange(row.slotId, Number(val))}
                             className="w-16 px-1.5 py-1 text-center font-bold text-stone-900 border border-stone-300 rounded focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                             title="Prezzo di vendita al pubblico"
                           />
@@ -564,6 +568,7 @@ export const RestockModal: React.FC = () => {
                               <input
                                 type="number"
                                 min={0}
+                                max={Math.max(0, row.previousStock - row.countedRemaining)}
                                 value={row.unitsRemoved || 0}
                                 onChange={e => handleRemovedChange(row.slotId, parseInt(e.target.value) || 0)}
                                 className="w-8 text-center font-bold bg-white border border-rose-300 rounded text-3xs"
@@ -809,7 +814,7 @@ export const RestockModal: React.FC = () => {
           cashWithdrawn={cashCollected}
           items={rows.map(r => {
             const sold = Math.max(0, r.previousStock - r.countedRemaining - (r.unitsRemoved || 0));
-            const rev = sold * r.salePrice;
+            const rev = Number((sold * r.oldSalePrice).toFixed(2));
             const slot = selectedMachine.slots.find(s => s.id === r.slotId);
             const fifo = slot ? consumeSlotFifo(slot, sold, r.unitCost) : { costOfSold: sold * r.unitCost };
             return {

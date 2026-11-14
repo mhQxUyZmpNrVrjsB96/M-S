@@ -20,10 +20,11 @@ import {
   FileText
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
-import { formatEuro, formatPercent, CATEGORY_META } from '../utils/vendingUtils';
+import { formatEuro, formatPercent, CATEGORY_META, oggiLocale, roundUnitCost } from '../utils/vendingUtils';
 import { Product, PurchaseBatch } from '../types';
 import { parseExpiryFromText } from '../utils/expiryUtils';
 import { InteractiveDatePicker } from './common/InteractiveDatePicker';
+import { SmartNumberInput } from './common/SmartNumberInput';
 
 export const PurchasesManager: React.FC = () => {
   const { 
@@ -43,10 +44,12 @@ export const PurchasesManager: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterSupplier, setFilterSupplier] = useState<string>('all');
 
+  const activeProducts = useMemo(() => products.filter(p => !p.archived), [products]);
+
   // Form State
-  const [selectedProductId, setSelectedProductId] = useState<string>(products[0]?.id || '');
+  const [selectedProductId, setSelectedProductId] = useState<string>(activeProducts[0]?.id || products[0]?.id || '');
   const [supplier, setSupplier] = useState('');
-  const [purchaseDate, setPurchaseDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [purchaseDate, setPurchaseDate] = useState<string>(() => oggiLocale());
   const [packageCount, setPackageCount] = useState<number | ''>('');
   const [unitsPerPackage, setUnitsPerPackage] = useState<number | ''>('');
   const [priceInputType, setPriceInputType] = useState<'per_pezzo' | 'per_confezione' | 'totale'>('per_pezzo');
@@ -66,8 +69,8 @@ export const PurchasesManager: React.FC = () => {
 
   // Selected product object
   const selectedProduct = useMemo(() => {
-    return products.find(p => p.id === selectedProductId) || products[0];
-  }, [products, selectedProductId]);
+    return activeProducts.find(p => p.id === selectedProductId) || activeProducts[0] || products[0];
+  }, [activeProducts, products, selectedProductId]);
 
   // Real-time calculations for the form (safe with empty inputs)
   const numPackages = packageCount === '' ? 0 : Number(packageCount);
@@ -106,9 +109,9 @@ export const PurchasesManager: React.FC = () => {
   }
 
   const totalVat = Math.max(0, totalGross - totalTaxable);
-  // Arrotondamento per eccesso/difetto al centesimo (es. 0.537 -> 0.54)
-  const unitCostNet = Math.round((totalTaxable / totalUnits) * 100) / 100;
-  const unitCostWithVat = Math.round((totalGross / totalUnits) * 100) / 100;
+  // Precisione a 4 decimali sui costi unitari (arrotondati a 2 decimali solo in visualizzazione)
+  const unitCostNet = totalUnits > 0 ? roundUnitCost(totalTaxable / totalUnits) : 0;
+  const unitCostWithVat = totalUnits > 0 ? roundUnitCost(totalGross / totalUnits) : 0;
   const appliedUnitCost = costBasisUsed === 'ivato' ? unitCostWithVat : unitCostNet;
 
   // Stima margine con prezzo vendita attuale
@@ -129,7 +132,7 @@ export const PurchasesManager: React.FC = () => {
     setVatRate(22);
     setCostBasisUsed('ivato');
     setInvoiceRef('DDT-2026/04');
-    setPurchaseDate(new Date().toISOString().slice(0, 10));
+    setPurchaseDate(oggiLocale());
     setNotes('2 confezioni da 24 lattine a 0,54€/pz senza IVA');
     setBatchNumber(`LOT-CC-${Math.floor(1000 + Math.random() * 9000)}`);
   };
@@ -155,7 +158,7 @@ export const PurchasesManager: React.FC = () => {
     setPriceInputType('per_pezzo');
     setIsPriceWithoutVat(true);
     setCostBasisUsed('ivato');
-    setPurchaseDate(new Date().toISOString().slice(0, 10));
+    setPurchaseDate(oggiLocale());
     setBatchNumber(`LOT-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`);
     setExpiryDate('');
     setNotes('');
@@ -686,7 +689,7 @@ export const PurchasesManager: React.FC = () => {
                   className="w-full px-3 py-2 text-sm bg-white border border-stone-300 rounded-lg text-stone-900 font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
                   required
                 >
-                  {products.map(p => (
+                  {activeProducts.map(p => (
                     <option key={p.id} value={p.id}>
                       {p.name} — Attuale Costo: {formatEuro(p.unitCost)} | Prezzo Vendita: {formatEuro(p.defaultPrice)}
                     </option>
@@ -867,12 +870,13 @@ export const PurchasesManager: React.FC = () => {
                     </label>
                     <div className="relative">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 text-xs font-bold">€</span>
-                      <input
-                        type="number"
-                        min="0.001"
-                        step="0.001"
+                      <SmartNumberInput
+                        allowDecimals={true}
+                        allowEmpty={true}
+                        defaultValueIfEmpty=""
+                        min={0.001}
                         value={inputPrice}
-                        onChange={(e) => setInputPrice(e.target.value === '' ? '' : parseFloat(e.target.value) || '')}
+                        onChange={(val) => setInputPrice(val === '' ? '' : Number(val))}
                         placeholder=""
                         className="w-full pl-7 pr-3 py-1.5 text-sm font-black border border-emerald-300 rounded-lg text-stone-900 bg-white"
                         required

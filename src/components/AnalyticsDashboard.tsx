@@ -83,11 +83,32 @@ export const AnalyticsDashboard: React.FC = () => {
     const avgTicket = totalUnits > 0 ? totalRevenue / totalUnits : 0;
     const avgProfitPerUnit = totalUnits > 0 ? totalProfit / totalUnits : 0;
 
-    // Calcolo giorni coperti nel periodo
-    const sessionDates = filteredSessions.map(s => new Date(s.timestamp).toDateString());
-    const uniqueDays = new Set(sessionDates).size || 1;
-    const dailyAvgRevenue = totalRevenue / uniqueDays;
-    const dailyAvgUnits = totalUnits / uniqueDays;
+    // Calcolo giorni del periodo selezionato
+    const now = new Date();
+    const toUtcDayMs = (d: Date) => Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+    let periodDays = 1;
+    if (periodFilter === 'today') {
+      periodDays = 1;
+    } else if (periodFilter === '7days') {
+      periodDays = 7;
+    } else if (periodFilter === '30days') {
+      periodDays = 30;
+    } else if (periodFilter === 'year') {
+      periodDays = Math.max(1, Math.round((toUtcDayMs(now) - Date.UTC(now.getFullYear(), 0, 1)) / 86400000) + 1);
+    } else {
+      // 'all': giorni dalla prima sessione registrata ad oggi (incluso)
+      if (filteredSessions.length > 0) {
+        const minTs = Math.min(...filteredSessions.map(s => new Date(s.timestamp).getTime()));
+        const startDayMs = toUtcDayMs(new Date(minTs));
+        const endDayMs = toUtcDayMs(now);
+        periodDays = Math.max(1, Math.round((endDayMs - startDayMs) / 86400000) + 1);
+      } else {
+        periodDays = 1;
+      }
+    }
+
+    const dailyAvgRevenue = totalRevenue / periodDays;
+    const dailyAvgUnits = totalUnits / periodDays;
 
     return {
       totalRevenue,
@@ -97,12 +118,12 @@ export const AnalyticsDashboard: React.FC = () => {
       totalUnits,
       avgTicket,
       avgProfitPerUnit,
-      uniqueDays,
+      uniqueDays: periodDays,
       dailyAvgRevenue,
       dailyAvgUnits,
       sessionCount: filteredSessions.length,
     };
-  }, [filteredSessions]);
+  }, [filteredSessions, periodFilter]);
 
   // Dati Serie Storica per Grafico ad Area (Andamento Temporale)
   const timelineData = useMemo(() => {
@@ -113,7 +134,7 @@ export const AnalyticsDashboard: React.FC = () => {
 
     for (const s of sorted) {
       const d = new Date(s.timestamp);
-      const key = d.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' });
+      const key = d.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: 'numeric' });
       const fullDate = d.toLocaleDateString('it-IT', { day: '2-digit', month: 'short', year: 'numeric' });
 
       const current = map.get(key) || { date: key, fullDate, revenue: 0, cost: 0, profit: 0, units: 0 };

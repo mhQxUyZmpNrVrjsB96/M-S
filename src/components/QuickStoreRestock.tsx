@@ -22,7 +22,7 @@ import {
   Undo2
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
-import { formatEuro, formatPercent, calculateFifoLoadPlan, consumeSlotFifo, getSlotActiveCost } from '../utils/vendingUtils';
+import { formatEuro, formatPercent, calculateFifoLoadPlan, consumeSlotFifo, getSlotActiveCost, costoUnitarioLotto } from '../utils/vendingUtils';
 import { EditSpiralsModal } from './EditSpiralsModal';
 import { CoffeeRestockView } from './coffee/CoffeeRestockView';
 import { SmartNumberInput } from './common/SmartNumberInput';
@@ -38,6 +38,7 @@ export const QuickStoreRestock: React.FC = () => {
     deleteSlotFromMachine, 
     restockHistory,
     lastPreConfirmBackup,
+    restoreCheckpoint,
     restoreLastPreConfirmBackup
   } = useVending();
 
@@ -46,6 +47,7 @@ export const QuickStoreRestock: React.FC = () => {
   const [cashWithdrawn, setCashWithdrawn] = useState<number | ''>('');
   const [operatorNotes, setOperatorNotes] = useState<string>('');
   const [isSaved, setIsSaved] = useState<boolean>(false);
+  const [savedCheckpointId, setSavedCheckpointId] = useState<string | null>(null);
   const [savedTimeNotice, setSavedTimeNotice] = useState<string>('');
   const [isReviewModalOpen, setIsReviewModalOpen] = useState<boolean>(false);
   const [restoreFeedback, setRestoreFeedback] = useState<string | null>(null);
@@ -73,7 +75,7 @@ export const QuickStoreRestock: React.FC = () => {
     showRemovedInput?: boolean;
   }>>({});
 
-  // Inizializza i valori quando cambia la macchina o i prodotti
+  // Inizializza i valori solo quando cambia il distributore selezionato
   React.useEffect(() => {
     if (!activeMachine) return;
     const initial: Record<string, { 
@@ -102,7 +104,18 @@ export const QuickStoreRestock: React.FC = () => {
     setItemCounts(initial);
     setCashWithdrawn(activeMachine.cashBalance || 0);
     setIsSaved(false);
-  }, [activeMachine, products]);
+    setSavedCheckpointId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMachine?.id]);
+
+  // Nasconde automaticamente il banner di conferma dopo 30 secondi
+  React.useEffect(() => {
+    if (!isSaved) return;
+    const timer = setTimeout(() => {
+      setIsSaved(false);
+    }, 30000);
+    return () => clearTimeout(timer);
+  }, [isSaved]);
 
   // Calcola quante scorte a magazzino sono effettivamente disponibili per uno slot specifico
   const getSlotAvailableWarehouse = useCallback((slotId: string, currentItemCounts: Record<string, { counted: number; removed: number; returnRemovedToWarehouse: boolean; added: number; price: number; showRemovedInput?: boolean }>) => {
@@ -132,6 +145,7 @@ export const QuickStoreRestock: React.FC = () => {
       const removed = state.removed || 0;
       // Venduti = PreviousStock - Counted - Removed (i pezzi tolti per scadenza o reso non sono vendite!)
       const sold = Math.max(0, prevStock - state.counted - removed);
+      const oldPrice = slot.salePrice;
       const price = state.price;
 
       // Determina il costo unitario reale di acquisto del lotto attualmente attivo nella spirale
@@ -155,8 +169,8 @@ export const QuickStoreRestock: React.FC = () => {
       // 2. Calcolo del piano di carico e costo per le unità caricate da magazzino (FIFO: dal lotto più vecchio)
       const loadPlan = calculateFifoLoadPlan(slot.productId, state.added, purchases, fallbackCost);
 
-      const revenue = sold * price;
-      const profit = revenue - costOfSold;
+      const revenue = Number((sold * oldPrice).toFixed(2));
+      const profit = Number((revenue - costOfSold).toFixed(2));
       const marginPct = revenue > 0 
         ? (profit / revenue) * 100 
         : (price > 0 ? ((price - activeUnitCost) / price) * 100 : 0);
@@ -425,7 +439,7 @@ export const QuickStoreRestock: React.FC = () => {
       marginPct: r.marginPct,
     }));
 
-    recordRestock({
+    const savedCp = recordRestock({
       machineId: activeMachine.id,
       machineName: activeMachine.name,
       machineCode: activeMachine.code,
@@ -438,20 +452,35 @@ export const QuickStoreRestock: React.FC = () => {
       operatorNotes: operatorNotes || 'Rifornimento rapido in negozio registrato con successo',
     });
 
+    // Allinea le righe alle nuove giacenze post-carico senza attendere il cambio macchina
+    const resetAfterSave: typeof itemCounts = {};
+    rowData.forEach(r => {
+      resetAfterSave[r.slotId] = {
+        counted: r.resultingStock,
+        removed: 0,
+        returnRemovedToWarehouse: false,
+        added: 0,
+        price: r.price,
+        showRemovedInput: false,
+      };
+    });
+    setItemCounts(resetAfterSave);
+
     const nowFormatted = new Date().toLocaleTimeString('it-IT');
+    setSavedCheckpointId(savedCp?.id || null);
     setSavedTimeNotice(nowFormatted);
     setIsReviewModalOpen(false);
     setIsSaved(true);
-    setTimeout(() => {
-      setIsSaved(false);
-    }, 6000);
   };
 
   const handleRestorePreviousCopy = () => {
-    const res = restoreLastPreConfirmBackup();
+    const res = savedCheckpointId
+      ? restoreCheckpoint(savedCheckpointId)
+      : restoreLastPreConfirmBackup();
     if (res.success) {
       setRestoreFeedback(res.message);
       setIsSaved(false);
+      setSavedCheckpointId(null);
       setTimeout(() => setRestoreFeedback(null), 5000);
     }
   };
@@ -643,7 +672,7 @@ export const QuickStoreRestock: React.FC = () => {
                 batchNumber: b.batchNumber,
                 invoiceRef: b.invoiceRef,
                 date: b.date,
-                cost: b.unitCostNet,
+                cost: costoUnitarioLotto(b),
                 qty: take
               });
               remainingToDeduct -= take;
@@ -739,12 +768,12 @@ export const QuickStoreRestock: React.FC = () => {
                     <div className="flex flex-wrap items-center gap-2 mt-1.5 text-2xs text-stone-500">
                       <span className="inline-flex items-center">
                         Prezzo ivato:
-                        <input 
-                          type="number"
-                          step="0.05"
-                          min="0.10"
+                        <SmartNumberInput
+                          allowDecimals={true}
+                          min={0.1}
+                          defaultValueIfEmpty={0.1}
                           value={row.price}
-                          onChange={(e) => setPrice(row.slotId, parseFloat(e.target.value) || 0)}
+                          onChange={(val) => setPrice(row.slotId, Number(val))}
                           className="w-14 ml-1 px-1.5 py-0.5 text-center font-bold text-stone-900 border border-stone-300 rounded focus:ring-1 focus:ring-emerald-500 bg-white"
                           title="Tocca per cambiare prezzo di vendita al volo (IVA compresa)"
                         />
@@ -1163,7 +1192,7 @@ export const QuickStoreRestock: React.FC = () => {
             <p className="text-2xs text-stone-300 mt-0.5 leading-relaxed">
               Dati registrati alle ore {savedTimeNotice || 'recenti'}. Il sistema ha archiviato automaticamente una copia identica dello stato precedente nei punti di ripristino.
             </p>
-            {lastPreConfirmBackup && (
+            {(savedCheckpointId || lastPreConfirmBackup) && (
               <button
                 type="button"
                 onClick={handleRestorePreviousCopy}
