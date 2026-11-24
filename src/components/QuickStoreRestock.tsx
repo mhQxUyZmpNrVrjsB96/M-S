@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import { 
   Zap, 
   Check, 
@@ -75,38 +75,116 @@ export const QuickStoreRestock: React.FC = () => {
     showRemovedInput?: boolean;
   }>>({});
 
-  // Inizializza i valori solo quando cambia il distributore selezionato
+  const prevMachineIdRef = useRef<string | null>(null);
+  const prevSlotMetaRef = useRef<Record<string, { stock: number; lastRestockStock?: number; productId: string; salePrice: number }>>({});
+
+  // Inizializza al cambio distributore e riallinea solo gli slot la cui giacenza/configurazione cambia davvero (es. carica da modale, annulla, backup, sync cloud)
   React.useEffect(() => {
     if (!activeMachine) return;
-    const initial: Record<string, { 
-      counted: number; 
-      removed: number; 
-      returnRemovedToWarehouse: boolean; 
-      added: number; 
-      price: number;
-      showRemovedInput?: boolean;
-    }> = {};
 
-    activeMachine.slots.forEach(slot => {
-      // Rimanenza precedentemente nota nello scomparto
-      const counted = slot.currentStock;
-      // IMPORTANTE: added parte da 0! L'operatore in negozio prima conta i pezzi trovati.
-      // Non pre-popolare added con missing, che causava calcoli sballati e svuotamento artificiale del magazzino!
-      initial[slot.id] = {
-        counted,
-        removed: 0,
-        returnRemovedToWarehouse: false,
-        added: 0,
-        price: slot.salePrice,
-        showRemovedInput: false,
-      };
+    const buildMeta = () => {
+      const meta: Record<string, { stock: number; lastRestockStock?: number; productId: string; salePrice: number }> = {};
+      activeMachine.slots.forEach(slot => {
+        meta[slot.id] = {
+          stock: slot.currentStock,
+          lastRestockStock: slot.lastRestockStock,
+          productId: slot.productId,
+          salePrice: slot.salePrice,
+        };
+      });
+      return meta;
+    };
+
+    if (prevMachineIdRef.current !== activeMachine.id) {
+      const initial: Record<string, { 
+        counted: number; 
+        removed: number; 
+        returnRemovedToWarehouse: boolean; 
+        added: number; 
+        price: number;
+        showRemovedInput?: boolean;
+      }> = {};
+
+      activeMachine.slots.forEach(slot => {
+        // Rimanenza precedentemente nota nello scomparto
+        const counted = slot.currentStock;
+        // IMPORTANTE: added parte da 0! L'operatore in negozio prima conta i pezzi trovati.
+        initial[slot.id] = {
+          counted,
+          removed: 0,
+          returnRemovedToWarehouse: false,
+          added: 0,
+          price: slot.salePrice,
+          showRemovedInput: false,
+        };
+      });
+
+      prevMachineIdRef.current = activeMachine.id;
+      prevSlotMetaRef.current = buildMeta();
+      setItemCounts(initial);
+      setCashWithdrawn(activeMachine.cashBalance || 0);
+      setIsSaved(false);
+      setSavedCheckpointId(null);
+      return;
+    }
+
+    const prevMeta = prevSlotMetaRef.current;
+    const nextMeta = buildMeta();
+    const currentSlotIds = new Set(activeMachine.slots.map(s => s.id));
+    let hasSlotChanges = Object.keys(prevMeta).some(id => !currentSlotIds.has(id));
+
+    if (!hasSlotChanges) {
+      for (const slot of activeMachine.slots) {
+        const prev = prevMeta[slot.id];
+        if (
+          !prev ||
+          prev.stock !== slot.currentStock ||
+          prev.lastRestockStock !== slot.lastRestockStock ||
+          prev.productId !== slot.productId ||
+          prev.salePrice !== slot.salePrice
+        ) {
+          hasSlotChanges = true;
+          break;
+        }
+      }
+    }
+
+    if (!hasSlotChanges) return;
+
+    prevSlotMetaRef.current = nextMeta;
+    setItemCounts(prevCounts => {
+      const updated: typeof prevCounts = {};
+      activeMachine.slots.forEach(slot => {
+        const prev = prevMeta[slot.id];
+        const existing = prevCounts[slot.id];
+        const stockOrProductChanged =
+          !prev ||
+          !existing ||
+          prev.stock !== slot.currentStock ||
+          prev.lastRestockStock !== slot.lastRestockStock ||
+          prev.productId !== slot.productId;
+
+        if (stockOrProductChanged) {
+          updated[slot.id] = {
+            counted: slot.currentStock,
+            removed: 0,
+            returnRemovedToWarehouse: false,
+            added: 0,
+            price: slot.salePrice,
+            showRemovedInput: false,
+          };
+        } else if (prev.salePrice !== slot.salePrice) {
+          updated[slot.id] = {
+            ...existing,
+            price: slot.salePrice,
+          };
+        } else {
+          updated[slot.id] = existing;
+        }
+      });
+      return updated;
     });
-    setItemCounts(initial);
-    setCashWithdrawn(activeMachine.cashBalance || 0);
-    setIsSaved(false);
-    setSavedCheckpointId(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMachine?.id]);
+  }, [activeMachine]);
 
   // Nasconde automaticamente il banner di conferma dopo 30 secondi
   React.useEffect(() => {

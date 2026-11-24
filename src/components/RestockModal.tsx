@@ -69,14 +69,18 @@ export const RestockModal: React.FC = () => {
   const [isSuccessFeedback, setIsSuccessFeedback] = useState<boolean>(false);
   const [isReviewModalOpen, setIsReviewModalOpen] = useState<boolean>(false);
 
-  // Imposta macchina attiva
+  // Imposta macchina attiva solo all'apertura del modale (non sovrascrive la scelta dell'utente se machines si aggiorna in background)
   useEffect(() => {
     if (activeModalMachineId) {
       setSelectedMachineId(activeModalMachineId);
-    } else if (machines.length > 0 && !selectedMachineId) {
+    }
+  }, [activeModalMachineId]);
+
+  useEffect(() => {
+    if (!activeModalMachineId && machines.length > 0 && !selectedMachineId) {
       setSelectedMachineId(machines[0].id);
     }
-  }, [activeModalMachineId, machines]);
+  }, [activeModalMachineId, machines, selectedMachineId]);
 
   const selectedMachine = useMemo(() => {
     return machines.find(m => m.id === selectedMachineId) || machines[0];

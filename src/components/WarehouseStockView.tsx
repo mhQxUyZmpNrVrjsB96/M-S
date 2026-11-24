@@ -43,6 +43,7 @@ import { ManageDosagePresetsModal } from './coffee/ManageDosagePresetsModal';
 import { SmartNumberInput } from './common/SmartNumberInput';
 import { ConfirmUnsavedModal } from './common/ConfirmUnsavedModal';
 import { WarehouseConfirmModal } from './common/WarehouseConfirmModal';
+import { EditBatchModal } from './common/EditBatchModal';
 
 interface WarehouseStockViewProps {
   onNavigateToPurchases?: () => void;
@@ -57,6 +58,8 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
     updateWarehouseStock, 
     updateBatchUnits, 
     addPurchase,
+    updatePurchase,
+    deletePurchase,
     addProduct,
     deleteProduct,
     clearAllProducts,
@@ -98,6 +101,8 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [stockStatusFilter, setStockStatusFilter] = useState<'all' | 'critical' | 'low' | 'good'>('all');
+  const [editingBatch, setEditingBatch] = useState<{ batch: PurchaseBatch; unit: string } | null>(null);
+  const [batchToDelete, setBatchToDelete] = useState<{ batch: PurchaseBatch; unit: string } | null>(null);
   const [expandedLotti, setExpandedLotti] = useState<Record<string, boolean>>({});
   const [isDosageModalOpen, setIsDosageModalOpen] = useState(false);
 
@@ -1055,6 +1060,23 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
                                           +
                                         </button>
                                       </div>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingBatch({ batch, unit: product.unit })}
+                                        className="p-1.5 rounded-lg text-stone-500 hover:text-amber-800 hover:bg-amber-50 border border-transparent hover:border-amber-200 transition-colors cursor-pointer"
+                                        title={`Modifica lotto ${batch.batchNumber}`}
+                                      >
+                                        <Edit3 className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setBatchToDelete({ batch, unit: product.unit })}
+                                        className="p-1.5 rounded-lg text-stone-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors cursor-pointer"
+                                        title={`Elimina lotto ${batch.batchNumber}`}
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
                                     </div>
                                   </div>
                                 </div>
@@ -2574,6 +2596,71 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
           batchNumber={confirmModalData.batchNumber}
           invoiceRef={confirmModalData.invoiceRef}
         />
+      )}
+
+      {/* Modale Modifica Singolo Lotto */}
+      {editingBatch && (
+        <EditBatchModal
+          batch={editingBatch.batch}
+          productUnit={editingBatch.unit}
+          onClose={() => setEditingBatch(null)}
+          onSave={(batchId, updates) => {
+            updatePurchase(batchId, updates);
+            setEditingBatch(null);
+            setWarehouseToast({
+              message: `Lotto "${updates.batchNumber}" aggiornato con successo.`,
+              showUndo: true,
+            });
+          }}
+          onDelete={(batchId) => {
+            const deletedNum = editingBatch.batch.batchNumber;
+            deletePurchase(batchId);
+            setEditingBatch(null);
+            setWarehouseToast({
+              message: `Lotto "${deletedNum}" eliminato e scorte ricalcolate.`,
+              showUndo: true,
+            });
+          }}
+        />
+      )}
+
+      {/* Modale Conferma Eliminazione Singolo Lotto */}
+      {batchToDelete && (
+        <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-stone-200 shadow-2xl max-w-sm w-full p-5 text-center animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center mx-auto mb-3">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <h3 className="font-bold text-stone-900 text-base">Eliminare questo lotto?</h3>
+            <p className="text-xs text-stone-600 mt-1.5">
+              Stai per eliminare il lotto <strong className="font-mono text-stone-900">{batchToDelete.batch.batchNumber}</strong> di <strong>{batchToDelete.batch.productName}</strong> ({batchToDelete.batch.remainingUnits} {batchToDelete.unit} residui in magazzino).
+            </p>
+            <div className="mt-5 flex items-center justify-center space-x-2">
+              <button
+                type="button"
+                onClick={() => setBatchToDelete(null)}
+                className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold cursor-pointer"
+              >
+                Annulla
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const deletedNum = batchToDelete.batch.batchNumber;
+                  deletePurchase(batchToDelete.batch.id);
+                  setBatchToDelete(null);
+                  setWarehouseToast({
+                    message: `Lotto "${deletedNum}" eliminato e scorte ricalcolate.`,
+                    showUndo: true,
+                  });
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
+              >
+                Sì, Elimina Lotto
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Banner Notifica Operazione Magazzino con Ripristino Copia Precedente */}

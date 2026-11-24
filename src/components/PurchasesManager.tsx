@@ -17,7 +17,8 @@ import {
   Warehouse,
   PackagePlus,
   Calendar,
-  FileText
+  FileText,
+  Edit3
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
 import { formatEuro, formatPercent, CATEGORY_META, oggiLocale, roundUnitCost } from '../utils/vendingUtils';
@@ -25,12 +26,14 @@ import { Product, PurchaseBatch } from '../types';
 import { parseExpiryFromText } from '../utils/expiryUtils';
 import { InteractiveDatePicker } from './common/InteractiveDatePicker';
 import { SmartNumberInput } from './common/SmartNumberInput';
+import { EditBatchModal } from './common/EditBatchModal';
 
 export const PurchasesManager: React.FC = () => {
   const { 
     products, 
     purchases, 
     addPurchase, 
+    updatePurchase,
     deletePurchase, 
     clearAllPurchases, 
     updateBatchUnits, 
@@ -41,6 +44,8 @@ export const PurchasesManager: React.FC = () => {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isClearPurchasesModalOpen, setIsClearPurchasesModalOpen] = useState(false);
+  const [editingBatch, setEditingBatch] = useState<PurchaseBatch | null>(null);
+  const [batchToDelete, setBatchToDelete] = useState<PurchaseBatch | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterSupplier, setFilterSupplier] = useState<string>('all');
 
@@ -615,17 +620,24 @@ export const PurchasesManager: React.FC = () => {
 
                     {/* Actions */}
                     <td className="py-3 px-4 text-center whitespace-nowrap">
-                      <button
-                        onClick={() => {
-                          if (confirm(`Sei sicuro di voler eliminare il lotto ${purchase.batchNumber}?`)) {
-                            deletePurchase(purchase.id);
-                          }
-                        }}
-                        className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
-                        title="Elimina lotto"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="inline-flex items-center space-x-1">
+                        <button
+                          type="button"
+                          onClick={() => setEditingBatch(purchase)}
+                          className="p-1.5 text-stone-500 hover:text-amber-800 hover:bg-amber-50 rounded-md transition-colors cursor-pointer"
+                          title={`Modifica lotto ${purchase.batchNumber}`}
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setBatchToDelete(purchase)}
+                          className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                          title={`Elimina lotto ${purchase.batchNumber}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -1078,6 +1090,56 @@ export const PurchasesManager: React.FC = () => {
                 className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
               >
                 Sì, Svuota Lotti
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Modale Modifica Singolo Lotto */}
+      {editingBatch && (
+        <EditBatchModal
+          batch={editingBatch}
+          productUnit={products.find(p => p.id === editingBatch.productId)?.unit || 'pz'}
+          onClose={() => setEditingBatch(null)}
+          onSave={(batchId, updates) => {
+            updatePurchase(batchId, updates);
+            setEditingBatch(null);
+          }}
+          onDelete={(batchId) => {
+            deletePurchase(batchId);
+            setEditingBatch(null);
+          }}
+        />
+      )}
+
+      {/* Modale Conferma Eliminazione Singolo Lotto */}
+      {batchToDelete && (
+        <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-stone-200 shadow-2xl max-w-sm w-full p-5 text-center animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center mx-auto mb-3">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <h3 className="font-bold text-stone-900 text-base">Eliminare questo lotto?</h3>
+            <p className="text-xs text-stone-600 mt-1.5">
+              Stai per eliminare il lotto <strong className="font-mono text-stone-900">{batchToDelete.batchNumber}</strong> di <strong>{batchToDelete.productName}</strong> ({batchToDelete.remainingUnits} pz residui in magazzino).
+            </p>
+            <div className="mt-5 flex items-center justify-center space-x-2">
+              <button
+                type="button"
+                onClick={() => setBatchToDelete(null)}
+                className="px-4 py-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold cursor-pointer"
+              >
+                Annulla
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  deletePurchase(batchToDelete.id);
+                  setBatchToDelete(null);
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer"
+              >
+                Sì, Elimina Lotto
               </button>
             </div>
           </div>

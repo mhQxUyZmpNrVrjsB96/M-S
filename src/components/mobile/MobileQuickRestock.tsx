@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { 
   Zap, 
   Check, 
@@ -77,35 +77,114 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
     showRemovedInput?: boolean;
   }>>({});
 
-  // Inizializza al cambio macchina
+  const prevMachineIdRef = useRef<string | null>(null);
+  const prevSlotMetaRef = useRef<Record<string, { stock: number; lastRestockStock?: number; productId: string; salePrice: number }>>({});
+
+  // Inizializza al cambio macchina e riallinea solo gli slot la cui giacenza/configurazione cambia davvero (es. carica da modale, annulla, backup, sync cloud)
   useEffect(() => {
     if (!activeMachine) return;
-    const initial: Record<string, { 
-      counted: number; 
-      removed: number; 
-      returnRemovedToWarehouse: boolean; 
-      added: number; 
-      price: number;
-      showRemovedInput?: boolean;
-    }> = {};
 
-    activeMachine.slots.forEach(slot => {
-      const counted = slot.currentStock;
-      // IMPORTANTE: added parte da 0! L'operatore prima conta o toglie i prodotti trovati.
-      initial[slot.id] = {
-        counted,
-        removed: 0,
-        returnRemovedToWarehouse: false,
-        added: 0,
-        price: slot.salePrice,
-        showRemovedInput: false,
-      };
+    const buildMeta = () => {
+      const meta: Record<string, { stock: number; lastRestockStock?: number; productId: string; salePrice: number }> = {};
+      activeMachine.slots.forEach(slot => {
+        meta[slot.id] = {
+          stock: slot.currentStock,
+          lastRestockStock: slot.lastRestockStock,
+          productId: slot.productId,
+          salePrice: slot.salePrice,
+        };
+      });
+      return meta;
+    };
+
+    if (prevMachineIdRef.current !== activeMachine.id) {
+      const initial: Record<string, { 
+        counted: number; 
+        removed: number; 
+        returnRemovedToWarehouse: boolean; 
+        added: number; 
+        price: number;
+        showRemovedInput?: boolean;
+      }> = {};
+
+      activeMachine.slots.forEach(slot => {
+        const counted = slot.currentStock;
+        // IMPORTANTE: added parte da 0! L'operatore prima conta o toglie i prodotti trovati.
+        initial[slot.id] = {
+          counted,
+          removed: 0,
+          returnRemovedToWarehouse: false,
+          added: 0,
+          price: slot.salePrice,
+          showRemovedInput: false,
+        };
+      });
+
+      prevMachineIdRef.current = activeMachine.id;
+      prevSlotMetaRef.current = buildMeta();
+      setItemCounts(initial);
+      setCashWithdrawn(activeMachine.cashBalance || 0);
+      setIsSaved(false);
+      return;
+    }
+
+    const prevMeta = prevSlotMetaRef.current;
+    const nextMeta = buildMeta();
+    const currentSlotIds = new Set(activeMachine.slots.map(s => s.id));
+    let hasSlotChanges = Object.keys(prevMeta).some(id => !currentSlotIds.has(id));
+
+    if (!hasSlotChanges) {
+      for (const slot of activeMachine.slots) {
+        const prev = prevMeta[slot.id];
+        if (
+          !prev ||
+          prev.stock !== slot.currentStock ||
+          prev.lastRestockStock !== slot.lastRestockStock ||
+          prev.productId !== slot.productId ||
+          prev.salePrice !== slot.salePrice
+        ) {
+          hasSlotChanges = true;
+          break;
+        }
+      }
+    }
+
+    if (!hasSlotChanges) return;
+
+    prevSlotMetaRef.current = nextMeta;
+    setItemCounts(prevCounts => {
+      const updated: typeof prevCounts = {};
+      activeMachine.slots.forEach(slot => {
+        const prev = prevMeta[slot.id];
+        const existing = prevCounts[slot.id];
+        const stockOrProductChanged =
+          !prev ||
+          !existing ||
+          prev.stock !== slot.currentStock ||
+          prev.lastRestockStock !== slot.lastRestockStock ||
+          prev.productId !== slot.productId;
+
+        if (stockOrProductChanged) {
+          updated[slot.id] = {
+            counted: slot.currentStock,
+            removed: 0,
+            returnRemovedToWarehouse: false,
+            added: 0,
+            price: slot.salePrice,
+            showRemovedInput: false,
+          };
+        } else if (prev.salePrice !== slot.salePrice) {
+          updated[slot.id] = {
+            ...existing,
+            price: slot.salePrice,
+          };
+        } else {
+          updated[slot.id] = existing;
+        }
+      });
+      return updated;
     });
-    setItemCounts(initial);
-    setCashWithdrawn(activeMachine.cashBalance || 0);
-    setIsSaved(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeMachine?.id]);
+  }, [activeMachine]);
 
   // Calcola quante scorte a magazzino sono libere per uno slot specifico
   const getSlotAvailableWarehouse = useCallback((slotId: string, currentItemCounts: Record<string, any>) => {

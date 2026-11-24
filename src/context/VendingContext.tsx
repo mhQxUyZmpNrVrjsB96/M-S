@@ -63,6 +63,23 @@ export interface CreatePurchaseInput {
   expiryDate?: string; // Data scadenza opzionale (es. AAAA-MM-GG) o estratta dalle note
 }
 
+export interface UpdatePurchaseInput {
+  supplier: string;
+  packageCount: number;
+  unitsPerPackage: number;
+  remainingUnits: number;
+  priceInputType: 'per_confezione' | 'per_pezzo' | 'totale';
+  isPriceWithoutVat?: boolean;
+  inputPrice: number;
+  vatRate: number;
+  costBasisUsed?: 'netto' | 'ivato';
+  batchNumber: string;
+  invoiceRef?: string;
+  notes?: string;
+  date: string;
+  expiryDate?: string;
+}
+
 export interface StateSnapshot {
   id: string;
   timestamp: number;
@@ -98,6 +115,7 @@ interface VendingContextType {
   closeRestockModal: () => void;
   recordRestock: (session: Omit<RestockSession, 'id' | 'timestamp'>) => SaveCheckpoint;
   addPurchase: (input: CreatePurchaseInput) => void;
+  updatePurchase: (batchId: string, updates: UpdatePurchaseInput) => void;
   deletePurchase: (id: string) => void;
   updateBatchUnits: (batchId: string, newRemainingUnits: number) => void;
   updateBatchExpiry: (batchId: string, expiryDate: string, notes?: string) => void;
@@ -1148,10 +1166,139 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
   };
 
+  const updatePurchase = (batchId: string, updates: UpdatePurchaseInput) => {
+    const target = purchases.find(p => p.id === batchId);
+    if (!target) return;
+
+    const packageCount = Math.max(1, Number(updates.packageCount) || 1);
+    const unitsPerPackage = Math.max(1, Number(updates.unitsPerPackage) || 1);
+    const totalUnits = packageCount * unitsPerPackage;
+    const remainingUnits = Math.max(0, Number(updates.remainingUnits) || 0);
+    const isWithoutVat = updates.isPriceWithoutVat !== false;
+    const inputPrice = Math.max(0, Number(updates.inputPrice) || 0);
+    const vatRate = Math.max(0, Number(updates.vatRate) || 0);
+
+    let totalTaxable = 0;
+    let totalGross = 0;
+
+    if (updates.priceInputType === 'per_pezzo') {
+      if (isWithoutVat) {
+        totalTaxable = inputPrice * totalUnits;
+        totalGross = totalTaxable * (1 + vatRate / 100);
+      } else {
+        totalGross = inputPrice * totalUnits;
+        totalTaxable = totalGross / (1 + vatRate / 100);
+      }
+    } else if (updates.priceInputType === 'per_confezione') {
+      if (isWithoutVat) {
+        totalTaxable = inputPrice * packageCount;
+        totalGross = totalTaxable * (1 + vatRate / 100);
+      } else {
+        totalGross = inputPrice * packageCount;
+        totalTaxable = totalGross / (1 + vatRate / 100);
+      }
+    } else {
+      if (isWithoutVat) {
+        totalTaxable = inputPrice;
+        totalGross = totalTaxable * (1 + vatRate / 100);
+      } else {
+        totalGross = inputPrice;
+        totalTaxable = totalGross / (1 + vatRate / 100);
+      }
+    }
+
+    const totalVat = Math.max(0, totalGross - totalTaxable);
+    const unitCostNet = roundUnitCost(totalTaxable / totalUnits);
+    const unitCostWithVat = roundUnitCost(totalGross / totalUnits);
+    const costBasis = updates.costBasisUsed || target.costBasisUsed || 'ivato';
+    const parsedDate = updates.date ? new Date(updates.date) : new Date(target.date);
+    const purchaseDate = !isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : target.date;
+    const cleanBatchNumber = updates.batchNumber.trim() || target.batchNumber;
+    const cleanInvoiceRef = updates.invoiceRef !== undefined ? updates.invoiceRef.trim() : target.invoiceRef;
+    const cleanNotes = updates.notes !== undefined ? updates.notes.trim() : target.notes;
+    const cleanExpiry = updates.expiryDate !== undefined
+      ? (updates.expiryDate.trim() || undefined)
+      : target.expiryDate;
+
+    savePreviousStateBackup(`Modifica lotto "${target.batchNumber}" (${target.productName})`);
+    pushUndoSnapshot(`Modifica lotto "${cleanBatchNumber}" (${target.productName})`);
+
+    const updatedBatch: PurchaseBatch = {
+      ...target,
+      date: purchaseDate,
+      batchNumber: cleanBatchNumber,
+      supplier: updates.supplier.trim() || '-',
+      packageCount,
+      unitsPerPackage,
+      totalUnits,
+      remainingUnits,
+      priceInputType: updates.priceInputType,
+      isPriceWithoutVat: isWithoutVat,
+      inputPrice,
+      vatRate,
+      totalTaxable: Number(totalTaxable.toFixed(2)),
+      totalVat: Number(totalVat.toFixed(2)),
+      totalGross: Number(totalGross.toFixed(2)),
+      unitCostNet,
+      unitCostWithVat,
+      costBasisUsed: costBasis,
+      invoiceRef: cleanInvoiceRef,
+      notes: cleanNotes,
+      expiryDate: cleanExpiry,
+    };
+
+    const nextPurchases = purchases.map(p => (p.id === batchId ? updatedBatch : p));
+    setPurchases(nextPurchases);
+
+    const activeFifo = getActiveFifoBatch(target.productId, nextPurchases);
+    setProducts(prev =>
+      prev.map(p => {
+        if (p.id !== target.productId) return p;
+        const totalStock = calculateProductWarehouseStock(p.id, nextPurchases);
+        const activeCost = activeFifo ? costoUnitarioLotto(activeFifo) : p.unitCost;
+        return {
+          ...p,
+          unitCost: roundUnitCost(activeCost),
+          activeBatchId: activeFifo?.id,
+          warehouseStock: totalStock,
+        };
+      })
+    );
+
+    const updatedUnitCost = costoUnitarioLotto(updatedBatch);
+    setMachines(prev =>
+      prev.map(m => ({
+        ...m,
+        slots: m.slots.map(s => {
+          if (!s.loadedBatches || !s.loadedBatches.some(sb => sb.batchId === batchId)) {
+            return s;
+          }
+          const nextLoadedBatches = s.loadedBatches.map(sb =>
+            sb.batchId === batchId
+              ? {
+                  ...sb,
+                  batchNumber: cleanBatchNumber,
+                  invoiceRef: cleanInvoiceRef,
+                  unitCost: updatedUnitCost,
+                  expiryDate: cleanExpiry,
+                }
+              : sb
+          );
+          return {
+            ...s,
+            loadedBatches: nextLoadedBatches,
+            activeBatchNumber: nextLoadedBatches[0]?.batchNumber || s.activeBatchNumber,
+          };
+        }),
+      }))
+    );
+  };
+
   const deletePurchase = (id: string) => {
     const toDelete = purchases.find(p => p.id === id);
     if (!toDelete) return;
 
+    savePreviousStateBackup(`Eliminazione lotto "${toDelete.batchNumber}" (${toDelete.productName})`);
     pushUndoSnapshot(`Eliminazione lotto "${toDelete.batchNumber}" (${toDelete.productName})`);
 
     const nextPurchases = purchases.filter(p => p.id !== id);
@@ -3256,6 +3403,7 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         closeRestockModal,
         recordRestock,
         addPurchase,
+        updatePurchase,
         deletePurchase,
         updateBatchUnits,
         updateBatchExpiry,
