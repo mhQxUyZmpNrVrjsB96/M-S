@@ -18,7 +18,8 @@ import {
   Info,
   Sliders,
   RotateCcw,
-  ShieldCheck
+  ShieldCheck,
+  X
 } from 'lucide-react';
 import { useVending } from '../../context/VendingContext';
 import { formatEuro, consumeSlotFifo, calculateFifoLoadPlan, getSlotActiveCost } from '../../utils/vendingUtils';
@@ -672,14 +673,24 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
       {/* 2. BARRA DI RICERCA & FILTRO RAPIDO FILE (A, B, C...) */}
       <div className="bg-stone-900/90 border border-stone-800 rounded-2xl p-3 shadow-sm space-y-2">
         <div className="relative">
-          <Search className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <Search className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="text"
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder={`Cerca ${unitTerm} o prodotto (es. A1, Acqua, Caffè)...`}
-            className="w-full bg-stone-950 border border-stone-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-stone-500 focus:outline-none focus:border-amber-500"
+            className="w-full bg-stone-950 border border-stone-800 rounded-xl pl-9 pr-9 py-2 text-xs text-white placeholder-stone-500 focus:outline-none focus:border-amber-500"
           />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-white rounded-md cursor-pointer"
+              title="Cancella ricerca"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
 
         <div className="flex items-center justify-between gap-2 pt-1 overflow-x-auto no-scrollbar">
@@ -774,25 +785,25 @@ export const MobileQuickRestock: React.FC<MobileQuickRestockProps> = ({ onRestoc
                       className="bg-stone-900/95 border border-stone-800/90 rounded-2xl p-4 shadow-md space-y-3.5"
                     >
                       {/* Intestazione Spirale: Codice, Nome e Dettagli */}
-                      <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-stone-800/70">
-                        <div className="flex items-center space-x-2.5 min-w-0">
-                          <span className="font-mono text-xs font-black bg-stone-800 text-amber-300 border border-amber-500/40 px-2.5 py-1 rounded-lg shrink-0">
+                      <div className="flex items-start justify-between gap-3 pb-3 border-b border-stone-800/80">
+                        <div className="flex items-start space-x-3 min-w-0">
+                          <span className="font-mono tabular-nums text-base font-black bg-amber-400 text-stone-950 px-3 py-1.5 rounded-xl shrink-0 shadow-xs leading-none">
                             {row.slotLabel}
                           </span>
                           <div className="min-w-0">
-                            <h4 className="text-xs font-bold text-white truncate">
+                            <h4 className="text-base font-extrabold text-white leading-snug line-clamp-2">
                               {row.productName}
                             </h4>
-                            <div className="flex items-center space-x-1.5 text-3xs text-stone-400 mt-0.5">
-                              <span>Capienza: <strong className="text-stone-300">{row.capacity} pz</strong></span>
-                              <span className="text-stone-600">•</span>
-                              <span>In magazzino: <strong className="text-stone-300">{row.warehouseStock} pz</strong></span>
+                            <div className="flex items-center space-x-1.5 text-2xs text-stone-400 mt-1">
+                              <span>Capienza: <strong className="text-stone-200 tabular-nums">{row.capacity} pz</strong></span>
+                              <span className="text-stone-600">·</span>
+                              <span>Magazzino: <strong className="text-stone-200 tabular-nums">{row.warehouseStock} pz</strong></span>
                             </div>
                           </div>
                         </div>
 
                         <div className="text-right shrink-0">
-                          <span className="text-xs font-mono font-bold text-emerald-400 block">
+                          <span className="text-sm font-mono tabular-nums font-bold text-emerald-400 block">
                             {formatEuro(row.price)}
                           </span>
                           <span className="text-3xs text-stone-400">Prezzo ivato</span>

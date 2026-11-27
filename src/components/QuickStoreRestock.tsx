@@ -19,7 +19,11 @@ import {
   Trash2,
   ShieldCheck,
   RotateCcw,
-  Undo2
+  Undo2,
+  ChevronDown,
+  ChevronUp,
+  Search,
+  X
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
 import { formatEuro, formatPercent, calculateFifoLoadPlan, consumeSlotFifo, getSlotActiveCost, costoUnitarioLotto } from '../utils/vendingUtils';
@@ -54,6 +58,15 @@ export const QuickStoreRestock: React.FC = () => {
   const [isEditSpiralsOpen, setIsEditSpiralsOpen] = useState<boolean>(false);
   const [initialFocusSlotId, setInitialFocusSlotId] = useState<string | undefined>(undefined);
   const [slotIdConfirmingDelete, setSlotIdConfirmingDelete] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [expandedBatchSlots, setExpandedBatchSlots] = useState<Record<string, boolean>>({});
+
+  const toggleBatchDetails = useCallback((slotId: string) => {
+    setExpandedBatchSlots(prev => ({
+      ...prev,
+      [slotId]: !prev[slotId],
+    }));
+  }, []);
 
   const activeMachine = useMemo(() => {
     return machines.find(m => m.id === selectedMachineId) || machines[0];
@@ -125,6 +138,7 @@ export const QuickStoreRestock: React.FC = () => {
       setCashWithdrawn(activeMachine.cashBalance || 0);
       setIsSaved(false);
       setSavedCheckpointId(null);
+      setSearchQuery('');
       return;
     }
 
@@ -296,6 +310,20 @@ export const QuickStoreRestock: React.FC = () => {
       };
     });
   }, [activeMachine, products, purchases, itemCounts, getSlotAvailableWarehouse]);
+
+  // Spirali filtrate per ricerca prodotto o numero spirale (solo visualizzazione: totali e salvataggio restano invariati)
+  const filteredRowData = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return rowData
+      .map((row, idx) => ({ row, originalIndex: idx }))
+      .filter(({ row }) => {
+        if (!q) return true;
+        return (
+          row.productName.toLowerCase().includes(q) ||
+          row.slotLabel.toLowerCase().includes(q)
+        );
+      });
+  }, [rowData, searchQuery]);
 
   // Totali complessivi della sessione
   const totals = useMemo(() => {
@@ -713,6 +741,37 @@ export const QuickStoreRestock: React.FC = () => {
           </div>
         </div>
 
+        {/* Barra di Ricerca Prodotto o Numero Spirale */}
+        {rowData.length > 0 && (
+          <div className="px-5 py-3 border-b border-stone-200 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="relative flex-1 max-w-md">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={`Cerca prodotto per nome o numero ${unitTermLower}...`}
+                className="w-full pl-9 pr-9 py-2 text-xs sm:text-sm bg-stone-50 border border-stone-200 rounded-xl text-stone-900 placeholder:text-stone-400 focus:bg-white focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 focus:outline-hidden transition-all"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-stone-400 hover:text-stone-700 hover:bg-stone-100 rounded-md cursor-pointer transition-colors"
+                  title="Cancella ricerca"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+            {searchQuery.trim() && (
+              <span className="text-xs text-stone-500 font-medium tabular-nums">
+                Trovate <strong className="text-stone-900">{filteredRowData.length}</strong> su {rowData.length} {unitTermPluralLower}
+              </span>
+            )}
+          </div>
+        )}
+
         {rowData.length === 0 ? (
           <div className="p-10 text-center bg-stone-50/50 space-y-3">
             <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center mx-auto">
@@ -733,9 +792,29 @@ export const QuickStoreRestock: React.FC = () => {
               <span>+ Aggiungi {unitTermPlural} a Mano Ora</span>
             </button>
           </div>
+        ) : filteredRowData.length === 0 ? (
+          <div className="p-10 text-center bg-stone-50/40 space-y-3">
+            <div className="w-11 h-11 rounded-2xl bg-stone-100 text-stone-400 flex items-center justify-center mx-auto">
+              <Search className="w-5 h-5" />
+            </div>
+            <h3 className="text-sm font-bold text-stone-800">
+              Nessun risultato per &ldquo;{searchQuery.trim()}&rdquo;
+            </h3>
+            <p className="text-xs text-stone-500">
+              Nessun prodotto o numero {unitTermLower} corrisponde alla ricerca in questo distributore.
+            </p>
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-stone-100 text-stone-700 border border-stone-300 text-xs font-bold cursor-pointer transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Mostra tutte le {unitTermPluralLower}</span>
+            </button>
+          </div>
         ) : (
           <div className="divide-y divide-stone-100">
-          {rowData.map((row, index) => {
+          {filteredRowData.map(({ row, originalIndex }) => {
             // Calcolo previsione scarico FIFO per i pezzi ricaricati (row.added)
             const availableBatches = purchases
               .filter(p => p.productId === row.productId && p.remainingUnits > 0)
@@ -756,6 +835,8 @@ export const QuickStoreRestock: React.FC = () => {
               remainingToDeduct -= take;
             }
 
+            const isBatchOpen = !!expandedBatchSlots[row.slotId];
+
             return (
               <div 
                 key={row.slotId}
@@ -763,87 +844,92 @@ export const QuickStoreRestock: React.FC = () => {
               >
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                   {/* Info Prodotto e Prezzo */}
-                  <div className="flex-1 min-w-[220px]">
-                    <div className="flex items-center space-x-2">
-                      <span 
-                        className="font-mono text-2xs font-black text-stone-500 bg-stone-100 px-1.5 py-0.5 rounded border border-stone-200 select-none shadow-2xs"
-                        title={`Posizione #${index + 1} nella sequenza distributore`}
-                      >
-                        #{index + 1}
-                      </span>
-                      <input
-                        type="text"
-                        defaultValue={row.slotLabel}
-                        key={`${row.slotId}-${row.slotLabel}`}
-                        onFocus={(e) => e.target.select()}
-                        onBlur={(e) => {
-                          const newLabel = e.target.value.trim();
-                          if (newLabel && newLabel !== row.slotLabel) {
-                            updateMachineSlot(activeMachine.id, row.slotId, { label: newLabel });
-                          }
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            (e.target as HTMLInputElement).blur();
-                          }
-                        }}
-                        className="font-mono text-xs font-bold bg-white text-stone-800 px-2 py-0.5 rounded border border-stone-300 hover:border-amber-400 focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 w-20 sm:w-24 text-center transition-all shadow-2xs"
-                        placeholder="N°"
-                        title="Numero spirale a piacere (si riordina automaticamente in ordine numerico)"
-                      />
-                      {slotIdConfirmingDelete === row.slotId ? (
-                        <div className="flex items-center space-x-1 bg-white border border-rose-300 rounded px-1.5 py-0.5 shadow-2xs animate-in fade-in">
-                          <span className="text-3xs font-bold text-rose-700">Eliminare {unitTermLower}?</span>
-                          <button
-                            type="button"
-                            onClick={() => setSlotIdConfirmingDelete(null)}
-                            className="text-3xs text-stone-600 hover:text-stone-900 px-1 font-semibold cursor-pointer"
-                          >
-                            No
-                          </button>
-                          <button
-                            type="button"
-                            id={`btn-confirm-delete-quick-${row.slotId}`}
-                            onClick={() => {
-                              deleteSlotFromMachine(activeMachine.id, row.slotId);
-                              setSlotIdConfirmingDelete(null);
-                            }}
-                            className="text-3xs text-white bg-rose-600 hover:bg-rose-700 font-bold px-1.5 py-0.5 rounded cursor-pointer shadow-2xs"
-                          >
-                            Sì
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex items-center space-x-0.5">
-                          <button
-                            type="button"
-                            id={`btn-edit-quick-${row.slotId}`}
-                            onClick={() => {
-                              setInitialFocusSlotId(row.slotId);
-                              setIsEditSpiralsOpen(true);
-                            }}
-                            className="p-1 text-stone-400 hover:text-amber-700 hover:bg-stone-100 rounded-md transition-colors cursor-pointer"
-                            title={`Configura prodotto, capienza e allarmi di questo ${unitTermLower}`}
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            id={`btn-delete-quick-${row.slotId}`}
-                            onClick={() => setSlotIdConfirmingDelete(row.slotId)}
-                            className="p-1 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
-                            title={`Elimina questo ${unitTermLower} dal distributore`}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      )}
-                      <h3 className="font-bold text-stone-900 text-sm">
-                        {row.productName}
-                      </h3>
+                  <div className="flex-1 min-w-[240px]">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <input
+                          type="text"
+                          defaultValue={row.slotLabel}
+                          key={`${row.slotId}-${row.slotLabel}`}
+                          onFocus={(e) => e.target.select()}
+                          onBlur={(e) => {
+                            const newLabel = e.target.value.trim();
+                            if (newLabel && newLabel !== row.slotLabel) {
+                              updateMachineSlot(activeMachine.id, row.slotId, { label: newLabel });
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              (e.target as HTMLInputElement).blur();
+                            }
+                          }}
+                          className="font-mono tabular-nums text-base sm:text-lg font-black bg-stone-900 text-amber-300 px-2.5 py-1.5 rounded-xl border border-stone-800 hover:border-amber-400 focus:bg-white focus:text-stone-950 focus:border-amber-500 focus:ring-2 focus:ring-amber-500/30 w-20 sm:w-24 text-center transition-all shadow-2xs shrink-0"
+                          placeholder="N°"
+                          title="Numero spirale a piacere (tocca per modificare; si riordina automaticamente)"
+                        />
+                        <h3 className="text-base sm:text-lg font-extrabold text-stone-950 tracking-tight leading-snug">
+                          {row.productName}
+                        </h3>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0 pt-0.5">
+                        <span 
+                          className="font-mono tabular-nums text-2xs font-bold text-stone-400 px-1.5 py-0.5 select-none"
+                          title={`Posizione #${originalIndex + 1} nella sequenza distributore`}
+                        >
+                          #{originalIndex + 1}
+                        </span>
+                        {slotIdConfirmingDelete === row.slotId ? (
+                          <div className="flex items-center space-x-1 bg-white border border-rose-300 rounded px-1.5 py-0.5 shadow-2xs animate-in fade-in">
+                            <span className="text-3xs font-bold text-rose-700">Eliminare {unitTermLower}?</span>
+                            <button
+                              type="button"
+                              onClick={() => setSlotIdConfirmingDelete(null)}
+                              className="text-3xs text-stone-600 hover:text-stone-900 px-1 font-semibold cursor-pointer"
+                            >
+                              No
+                            </button>
+                            <button
+                              type="button"
+                              id={`btn-confirm-delete-quick-${row.slotId}`}
+                              onClick={() => {
+                                deleteSlotFromMachine(activeMachine.id, row.slotId);
+                                setSlotIdConfirmingDelete(null);
+                              }}
+                              className="text-3xs text-white bg-rose-600 hover:bg-rose-700 font-bold px-1.5 py-0.5 rounded cursor-pointer shadow-2xs"
+                            >
+                              Sì
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center space-x-0.5">
+                            <button
+                              type="button"
+                              id={`btn-edit-quick-${row.slotId}`}
+                              onClick={() => {
+                                setInitialFocusSlotId(row.slotId);
+                                setIsEditSpiralsOpen(true);
+                              }}
+                              className="p-1.5 text-stone-400 hover:text-amber-700 hover:bg-stone-100 rounded-lg transition-colors cursor-pointer"
+                              title={`Configura prodotto, capienza e allarmi di questo ${unitTermLower}`}
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              id={`btn-delete-quick-${row.slotId}`}
+                              onClick={() => setSlotIdConfirmingDelete(row.slotId)}
+                              className="p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                              title={`Elimina questo ${unitTermLower} dal distributore`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2 mt-1.5 text-2xs text-stone-500">
+                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 mt-2.5 text-xs text-stone-600">
                       <span className="inline-flex items-center">
                         Prezzo ivato:
                         <SmartNumberInput
@@ -852,48 +938,59 @@ export const QuickStoreRestock: React.FC = () => {
                           defaultValueIfEmpty={0.1}
                           value={row.price}
                           onChange={(val) => setPrice(row.slotId, Number(val))}
-                          className="w-14 ml-1 px-1.5 py-0.5 text-center font-bold text-stone-900 border border-stone-300 rounded focus:ring-1 focus:ring-emerald-500 bg-white"
+                          className="w-14 ml-1 px-1.5 py-0.5 text-center font-mono tabular-nums font-bold text-stone-900 border border-stone-300 rounded focus:ring-1 focus:ring-emerald-500 bg-white text-xs"
                           title="Tocca per cambiare prezzo di vendita al volo (IVA compresa)"
                         />
                         <span className="ml-0.5">€</span>
                       </span>
 
-                      <span className="text-stone-300">•</span>
-                      <span>Capacità max: <strong className="text-stone-700">{row.capacity} pz</strong></span>
+                      <span className="text-stone-300">·</span>
+                      <span>Capienza: <strong className="text-stone-800 tabular-nums">{row.capacity} pz</strong></span>
 
-                      {row.batchNumber ? (
-                        <>
-                          <span className="text-stone-300">•</span>
-                          <span className="text-emerald-800 font-mono font-semibold bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
-                            Lotto: {row.batchNumber} (costo ivato {formatEuro(row.unitCost)})
-                          </span>
-                        </>
-                      ) : (
-                        <>
-                          <span className="text-stone-300">•</span>
-                          <span className="text-stone-500 font-mono">
-                            Costo rif. ivato: {formatEuro(row.unitCost)}
-                          </span>
-                        </>
-                      )}
-
-                      <span className="text-stone-300">•</span>
-                      <span className="text-stone-700 font-medium">
-                        Margine unitario: <strong className="text-emerald-700">+{formatEuro(Math.max(0, row.price - row.unitCost))}</strong> ({row.price > 0 ? (((row.price - row.unitCost) / row.price) * 100).toFixed(0) : 0}%)
+                      <span className="text-stone-300">·</span>
+                      <span className="text-stone-700">
+                        Margine: <strong className="text-emerald-700 tabular-nums">+{formatEuro(Math.max(0, row.price - row.unitCost))}</strong> ({row.price > 0 ? (((row.price - row.unitCost) / row.price) * 100).toFixed(0) : 0}%)
                       </span>
 
-                      <span className="text-stone-300">•</span>
+                      <span className="text-stone-300">·</span>
                       <span>
-                        Disponibili magazzino:{' '}
-                        <strong className="text-stone-700">
+                        Magazzino:{' '}
+                        <strong className="text-stone-800 tabular-nums">
                           {row.warehouseStock} pz
                           {row.availableWarehouse < row.warehouseStock && (
                             <span className="text-stone-400 font-normal ml-1">
-                              ({row.availableWarehouse} pz liberi)
+                              ({row.availableWarehouse} liberi)
                             </span>
                           )}
                         </strong>
                       </span>
+
+                      <span className="text-stone-300">·</span>
+                      <button
+                        type="button"
+                        onClick={() => toggleBatchDetails(row.slotId)}
+                        aria-expanded={isBatchOpen}
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-2xs font-semibold transition-colors cursor-pointer select-none ${
+                          isBatchOpen
+                            ? 'bg-stone-100 border-stone-300 text-stone-900'
+                            : 'bg-white border-stone-200 text-stone-500 hover:text-stone-800 hover:border-stone-300'
+                        }`}
+                        title="Mostra o nascondi le informazioni sul lotto"
+                      >
+                        <Layers className="w-3 h-3" />
+                        <span>{isBatchOpen ? 'Nascondi lotto' : 'Dettagli lotto'}</span>
+                        {isBatchOpen ? (
+                          <ChevronUp className="w-3 h-3" />
+                        ) : (
+                          <ChevronDown className="w-3 h-3" />
+                        )}
+                      </button>
+
+                      {row.added > 0 && remainingToDeduct > 0 && !isBatchOpen && (
+                        <span className="text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded font-semibold border border-amber-200 text-2xs">
+                          ⚠️ {remainingToDeduct} pz oltre scorte
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -1128,32 +1225,49 @@ export const QuickStoreRestock: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Dettaglio di scarico FIFO in tempo reale */}
-                {row.added > 0 && (
-                  <div className="bg-stone-50 p-2.5 rounded-lg border border-stone-200/80 flex flex-wrap items-center justify-between gap-2 text-2xs">
-                    <div className="flex flex-wrap items-center gap-1.5 text-stone-700">
-                      <span className="font-bold text-emerald-800 flex items-center gap-1">
+                {/* Tendina a scomparsa per dettagli lotto e prelievo FIFO */}
+                {isBatchOpen && (
+                  <div className="bg-stone-50 px-3.5 py-2.5 rounded-xl border border-stone-200 flex flex-col gap-2 text-2xs">
+                    <div className="flex flex-wrap items-center gap-2 text-stone-700">
+                      <span className="font-bold text-stone-700 flex items-center gap-1">
                         <Layers className="w-3.5 h-3.5 text-emerald-600" />
-                        Prelievo da Magazzino:
+                        Lotto in spirale:
                       </span>
-                      {fifoDeductionPlan.length > 0 ? (
-                        fifoDeductionPlan.map((plan, idx) => (
-                          <span 
-                            key={idx} 
-                            className="bg-white px-2 py-0.5 rounded border border-emerald-300 font-mono text-emerald-900 shadow-2xs font-medium"
-                          >
-                            <strong>{plan.qty} pz</strong> da {plan.batchNumber} {plan.invoiceRef ? `(Fatt. ${plan.invoiceRef})` : ''} @ {formatEuro(plan.cost)} del {new Date(plan.date).toLocaleDateString('it-IT')}
-                          </span>
-                        ))
+                      {row.batchNumber ? (
+                        <span className="text-emerald-900 font-mono tabular-nums font-semibold bg-white px-2 py-0.5 rounded border border-emerald-200">
+                          {row.batchNumber} · costo ivato {formatEuro(row.unitCost)}
+                        </span>
                       ) : (
-                        <span className="text-stone-500 italic">Nessun lotto fornitore presente a magazzino</span>
-                      )}
-                      {remainingToDeduct > 0 && (
-                        <span className="text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded font-semibold border border-amber-200">
-                          ⚠️ {remainingToDeduct} pz oltre le scorte registrate
+                        <span className="text-stone-600 font-mono tabular-nums">
+                          Costo rif. ivato: {formatEuro(row.unitCost)}
                         </span>
                       )}
                     </div>
+
+                    {row.added > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 text-stone-700 pt-1.5 border-t border-stone-200/80">
+                        <span className="font-bold text-emerald-800">
+                          Prelievo da Magazzino:
+                        </span>
+                        {fifoDeductionPlan.length > 0 ? (
+                          fifoDeductionPlan.map((plan, idx) => (
+                            <span 
+                              key={idx} 
+                              className="bg-white px-2 py-0.5 rounded border border-emerald-300 font-mono tabular-nums text-emerald-900 font-medium"
+                            >
+                              <strong>{plan.qty} pz</strong> da {plan.batchNumber} {plan.invoiceRef ? `(Fatt. ${plan.invoiceRef})` : ''} @ {formatEuro(plan.cost)} del {new Date(plan.date).toLocaleDateString('it-IT')}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-stone-500 italic">Nessun lotto fornitore presente a magazzino</span>
+                        )}
+                        {remainingToDeduct > 0 && (
+                          <span className="text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded font-semibold border border-amber-200">
+                            ⚠️ {remainingToDeduct} pz oltre le scorte registrate
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
