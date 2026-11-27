@@ -115,7 +115,6 @@ interface VendingContextType {
   closeRestockModal: () => void;
   recordRestock: (session: Omit<RestockSession, 'id' | 'timestamp'>) => SaveCheckpoint;
   addPurchase: (input: CreatePurchaseInput) => void;
-  addMultiplePurchases: (inputs: CreatePurchaseInput[]) => void;
   updatePurchase: (batchId: string, updates: UpdatePurchaseInput) => void;
   deletePurchase: (id: string) => void;
   updateBatchUnits: (batchId: string, newRemainingUnits: number) => void;
@@ -1164,139 +1163,6 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         };
         return [...prev, newP];
       }
-    });
-  };
-
-  // Inserimento atomico di una fattura con più prodotti (crea un lotto indipendente per ogni prodotto in un solo passaggio)
-  const addMultiplePurchases = (inputs: CreatePurchaseInput[]) => {
-    const validInputs = inputs.filter(inp => (Number(inp.packageCount) || 0) * (Number(inp.unitsPerPackage) || 0) > 0);
-    if (validInputs.length === 0) return;
-
-    const firstInvoiceRef = validInputs[0].invoiceRef?.trim();
-    const firstSupplier = validInputs[0].supplier?.trim() || 'Fornitore Principale';
-    const summaryLabel = firstInvoiceRef
-      ? `Fattura ${firstInvoiceRef} (${firstSupplier}) — ${validInputs.length} ${validInputs.length === 1 ? 'prodotto' : 'prodotti'}`
-      : `Fattura ${firstSupplier} — ${validInputs.length} ${validInputs.length === 1 ? 'prodotto' : 'prodotti'}`;
-
-    savePreviousStateBackup(`Carico ${summaryLabel}`);
-    pushUndoSnapshot(`Carico ${summaryLabel}`);
-
-    const baseTs = Date.now();
-    const dateSlug = oggiLocale().slice(2).replace(/-/g, '');
-    const baseRand = Math.floor(Math.random() * 800 + 100);
-
-    const createdBatches: PurchaseBatch[] = validInputs.map((input, idx) => {
-      const totalUnits = input.packageCount * input.unitsPerPackage;
-      const prod = products.find(p => p.id === input.productId);
-      const prodName = prod ? prod.name : (input.productName || 'Prodotto');
-
-      let totalTaxable = 0;
-      let totalGross = 0;
-      const isWithoutVat = input.isPriceWithoutVat !== false;
-
-      if (input.priceInputType === 'per_pezzo') {
-        if (isWithoutVat) {
-          totalTaxable = input.inputPrice * totalUnits;
-          totalGross = totalTaxable * (1 + input.vatRate / 100);
-        } else {
-          totalGross = input.inputPrice * totalUnits;
-          totalTaxable = totalGross / (1 + input.vatRate / 100);
-        }
-      } else if (input.priceInputType === 'per_confezione') {
-        if (isWithoutVat) {
-          totalTaxable = input.inputPrice * input.packageCount;
-          totalGross = totalTaxable * (1 + input.vatRate / 100);
-        } else {
-          totalGross = input.inputPrice * input.packageCount;
-          totalTaxable = totalGross / (1 + input.vatRate / 100);
-        }
-      } else {
-        if (isWithoutVat) {
-          totalTaxable = input.inputPrice;
-          totalGross = totalTaxable * (1 + input.vatRate / 100);
-        } else {
-          totalGross = input.inputPrice;
-          totalTaxable = totalGross / (1 + input.vatRate / 100);
-        }
-      }
-
-      const totalVat = Math.max(0, totalGross - totalTaxable);
-      const unitCostNet = roundUnitCost(totalTaxable / totalUnits);
-      const unitCostWithVat = roundUnitCost(totalGross / totalUnits);
-      const costBasis = input.costBasisUsed || 'ivato';
-      const batchCode = input.batchNumber?.trim() || `LOT-${dateSlug}-${baseRand + idx}`;
-      const purchaseDate = input.date ? new Date(input.date).toISOString() : new Date().toISOString();
-
-      return {
-        id: `purch-${baseTs}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
-        date: purchaseDate,
-        batchNumber: batchCode,
-        productId: input.productId,
-        productName: prodName,
-        supplier: input.supplier.trim() || 'Fornitore Principale',
-        packageCount: input.packageCount,
-        unitsPerPackage: input.unitsPerPackage,
-        totalUnits,
-        remainingUnits: totalUnits,
-        priceInputType: input.priceInputType,
-        isPriceWithoutVat: isWithoutVat,
-        inputPrice: input.inputPrice,
-        vatRate: input.vatRate,
-        totalTaxable: Number(totalTaxable.toFixed(2)),
-        totalVat: Number(totalVat.toFixed(2)),
-        totalGross: Number(totalGross.toFixed(2)),
-        unitCostNet,
-        unitCostWithVat,
-        costBasisUsed: costBasis,
-        invoiceRef: input.invoiceRef?.trim(),
-        notes: input.notes?.trim(),
-        expiryDate: parseExpiryFromText(input.notes, input.expiryDate) || undefined,
-      };
-    });
-
-    const nextPurchases = [...createdBatches, ...purchases];
-    setPurchases(nextPurchases);
-
-    const affectedProductIds = Array.from(new Set(createdBatches.map(b => b.productId)));
-
-    setProducts(prev => {
-      const updated = prev.map(p => {
-        if (!affectedProductIds.includes(p.id)) return p;
-        const activeFifo = getActiveFifoBatch(p.id, nextPurchases);
-        const fallbackBatch = createdBatches.find(b => b.productId === p.id);
-        const activeCost = activeFifo
-          ? costoUnitarioLotto(activeFifo)
-          : (fallbackBatch ? costoUnitarioLotto(fallbackBatch) : p.unitCost);
-        const totalStock = calculateProductWarehouseStock(p.id, nextPurchases);
-        return {
-          ...p,
-          unitCost: roundUnitCost(activeCost),
-          activeBatchId: activeFifo?.id || fallbackBatch?.id || p.activeBatchId,
-          warehouseStock: totalStock,
-        };
-      });
-
-      const existingIds = new Set(prev.map(p => p.id));
-      const newProductsToAdd: Product[] = [];
-      for (const prodId of affectedProductIds) {
-        if (existingIds.has(prodId)) continue;
-        const batch = createdBatches.find(b => b.productId === prodId);
-        if (!batch) continue;
-        const activeFifo = getActiveFifoBatch(prodId, nextPurchases);
-        const activeCost = activeFifo ? costoUnitarioLotto(activeFifo) : costoUnitarioLotto(batch);
-        newProductsToAdd.push({
-          id: prodId,
-          name: batch.productName,
-          category: 'bevande_fredde',
-          defaultPrice: 1.0,
-          unitCost: roundUnitCost(activeCost),
-          activeBatchId: activeFifo?.id || batch.id,
-          warehouseStock: calculateProductWarehouseStock(prodId, nextPurchases),
-          unit: 'pz',
-        });
-      }
-
-      return newProductsToAdd.length > 0 ? [...updated, ...newProductsToAdd] : updated;
     });
   };
 
@@ -3537,7 +3403,6 @@ export const VendingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         closeRestockModal,
         recordRestock,
         addPurchase,
-        addMultiplePurchases,
         updatePurchase,
         deletePurchase,
         updateBatchUnits,

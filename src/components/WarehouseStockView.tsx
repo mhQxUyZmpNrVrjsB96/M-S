@@ -33,8 +33,7 @@ import {
   Scale,
   Undo2,
   RotateCcw,
-  ShieldCheck,
-  Receipt
+  ShieldCheck
 } from 'lucide-react';
 import { useVending } from '../context/VendingContext';
 import { InteractiveDatePicker } from './common/InteractiveDatePicker';
@@ -45,7 +44,6 @@ import { SmartNumberInput } from './common/SmartNumberInput';
 import { ConfirmUnsavedModal } from './common/ConfirmUnsavedModal';
 import { WarehouseConfirmModal } from './common/WarehouseConfirmModal';
 import { EditBatchModal } from './common/EditBatchModal';
-import { MultiProductInvoiceModal } from './common/MultiProductInvoiceModal';
 
 interface WarehouseStockViewProps {
   onNavigateToPurchases?: () => void;
@@ -60,7 +58,6 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
     updateWarehouseStock, 
     updateBatchUnits, 
     addPurchase,
-    addMultiplePurchases,
     updatePurchase,
     deletePurchase,
     addProduct,
@@ -108,15 +105,6 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
   const [batchToDelete, setBatchToDelete] = useState<{ batch: PurchaseBatch; unit: string } | null>(null);
   const [expandedLotti, setExpandedLotti] = useState<Record<string, boolean>>({});
   const [isDosageModalOpen, setIsDosageModalOpen] = useState(false);
-  const [isMultiInvoiceOpen, setIsMultiInvoiceOpen] = useState(false);
-
-  const existingSuppliers = useMemo(() => {
-    const s = new Set<string>();
-    purchases.forEach(p => {
-      if (p.supplier?.trim()) s.add(p.supplier.trim());
-    });
-    return Array.from(s).sort((a, b) => a.localeCompare(b, 'it'));
-  }, [purchases]);
 
   // Add Product Modal State
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
@@ -566,19 +554,6 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* PULSANTE PRIMARIO: NUOVA FATTURA MULTI-PRODOTTO */}
-            {products.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setIsMultiInvoiceOpen(true)}
-                className="inline-flex items-center space-x-2 px-4 py-2.5 text-xs font-bold bg-stone-900 hover:bg-stone-800 text-amber-300 rounded-xl shadow-xs transition-colors cursor-pointer"
-                title="Inserisci una fattura con uno o più prodotti e carica i relativi lotti in automatico"
-              >
-                <Receipt className="w-4 h-4" />
-                <span>+ Nuova Fattura</span>
-              </button>
-            )}
-
             {/* PULSANTE PRIMARIO: AGGIUNGI QUALSIASI PRODOTTO */}
             <button
               type="button"
@@ -2687,23 +2662,6 @@ export const WarehouseStockView: React.FC<WarehouseStockViewProps> = ({ onNaviga
           </div>
         </div>
       )}
-
-      {/* Modale Inserimento Nuova Fattura Multi-Prodotto */}
-      <MultiProductInvoiceModal
-        isOpen={isMultiInvoiceOpen}
-        products={products}
-        existingSuppliers={existingSuppliers}
-        onClose={() => setIsMultiInvoiceOpen(false)}
-        onSave={(inputs) => {
-          addMultiplePurchases(inputs);
-          const totalPcs = inputs.reduce((acc, i) => acc + i.packageCount * i.unitsPerPackage, 0);
-          const invRef = inputs[0]?.invoiceRef ? ` N° ${inputs[0].invoiceRef}` : '';
-          setWarehouseToast({
-            message: `Fattura${invRef} salvata: caricati ${inputs.length} ${inputs.length === 1 ? 'lotto' : 'lotti'} (${totalPcs} pz totali) in magazzino.`,
-            showUndo: true,
-          });
-        }}
-      />
 
       {/* Banner Notifica Operazione Magazzino con Ripristino Copia Precedente */}
       {warehouseToast && (

@@ -27,14 +27,12 @@ import { parseExpiryFromText } from '../utils/expiryUtils';
 import { InteractiveDatePicker } from './common/InteractiveDatePicker';
 import { SmartNumberInput } from './common/SmartNumberInput';
 import { EditBatchModal } from './common/EditBatchModal';
-import { MultiProductInvoiceModal } from './common/MultiProductInvoiceModal';
 
 export const PurchasesManager: React.FC = () => {
   const { 
     products, 
     purchases, 
     addPurchase, 
-    addMultiplePurchases,
     updatePurchase,
     deletePurchase, 
     clearAllPurchases, 
@@ -45,7 +43,6 @@ export const PurchasesManager: React.FC = () => {
   } = useVending();
 
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isMultiInvoiceOpen, setIsMultiInvoiceOpen] = useState(false);
   const [isClearPurchasesModalOpen, setIsClearPurchasesModalOpen] = useState(false);
   const [editingBatch, setEditingBatch] = useState<PurchaseBatch | null>(null);
   const [batchToDelete, setBatchToDelete] = useState<PurchaseBatch | null>(null);
@@ -261,16 +258,6 @@ export const PurchasesManager: React.FC = () => {
               <span>Svuota Lotti</span>
             </button>
           )}
-
-          <button
-            type="button"
-            onClick={() => setIsMultiInvoiceOpen(true)}
-            className="inline-flex items-center space-x-1.5 px-4 py-2 text-xs sm:text-sm font-bold bg-stone-900 hover:bg-stone-800 text-amber-300 rounded-lg shadow-xs transition-colors cursor-pointer"
-            title="Inserisci una fattura con più prodotti in una sola volta"
-          >
-            <Receipt className="w-4 h-4" />
-            <span>+ Nuova Fattura</span>
-          </button>
 
           <button
             id="btn-new-purchase"
@@ -1158,15 +1145,6 @@ export const PurchasesManager: React.FC = () => {
           </div>
         </div>
       )}
-
-      {/* Modale Inserimento Nuova Fattura Multi-Prodotto */}
-      <MultiProductInvoiceModal
-        isOpen={isMultiInvoiceOpen}
-        products={products}
-        existingSuppliers={uniqueSuppliers}
-        onClose={() => setIsMultiInvoiceOpen(false)}
-        onSave={(inputs) => addMultiplePurchases(inputs)}
-      />
     </div>
   );
 };
